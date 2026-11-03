@@ -50,13 +50,19 @@ async function buildAudio(events: AudioEvent[], total: number, dir: string, warn
       continue;
     }
     if (e.start >= total) continue;
-    let dur = e.duration ?? (await probeDuration(path));
+    let dur = e.duration;
+    if (dur == null) {
+      const full = await probeDuration(path);
+      if (full != null) dur = Math.max(0.05, full - e.offset);
+    }
     if (dur != null) dur = Math.min(dur, total - e.start);
     const k = chains.length; // numéro d'entrée ffmpeg (inputs contient aussi les options)
     if (e.loop) inputs.push('-stream_loop', '-1');
     inputs.push('-i', path);
     let c = `[${k}:a]aformat=sample_rates=48000:channel_layouts=stereo`;
-    if (dur != null) c += `,atrim=duration=${f(dur)},asetpts=PTS-STARTPTS`;
+    // extrait : on saute `offset` secondes dans le fichier puis on garde `dur`
+    const trim = [e.offset > 0 ? `start=${f(e.offset)}` : '', dur != null ? `duration=${f(dur)}` : ''].filter(Boolean);
+    if (trim.length) c += `,atrim=${trim.join(':')},asetpts=PTS-STARTPTS`;
     if (e.volume !== 1) c += `,volume=${f(e.volume)}`;
     if (e.fadeIn > 0) c += `,afade=t=in:st=0:d=${f(e.fadeIn)}`;
     if (e.fadeOut > 0 && dur != null) c += `,afade=t=out:st=${f(Math.max(0, dur - e.fadeOut))}:d=${f(e.fadeOut)}`;
@@ -68,7 +74,7 @@ async function buildAudio(events: AudioEvent[], total: number, dir: string, warn
   const labels = chains.map((_, i) => `[a${i}]`).join('');
   const filter = [
     ...chains,
-    `${labels}amix=inputs=${chains.length}:normalize=0:dropout_transition=0,alimiter=limit=0.95,atrim=duration=${f(total)}[aout]`,
+    `${labels}amix=inputs=${chains.length}:normalize=0:dropout_transition=0,alimiter=limit=0.95,apad,atrim=duration=${f(total)}[aout]`,
   ].join(';');
   return { inputs, filter };
 }

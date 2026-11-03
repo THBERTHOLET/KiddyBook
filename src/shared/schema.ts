@@ -93,6 +93,8 @@ export const ElementSchema = z.union([
 export const AudioSchema = z.object({
   name: z.string().optional(),
   file: z.string(),
+  /** Point de départ dans le fichier (s) : permet de jouer un extrait d'une narration plus longue. */
+  offset: z.number().min(0).optional(),
   start: z.number().min(0).optional(),
   duration: z.number().positive().optional(),
   volume: z.number().min(0).optional(),

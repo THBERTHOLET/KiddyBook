@@ -33,7 +33,8 @@ export class AudioPlayer {
     for (const e of events) {
       const buf = this.buffers.get(e.file);
       if (!buf) continue;
-      const len = e.loop ? e.duration! : Math.min(e.duration ?? buf.duration, buf.duration);
+      const avail = Math.max(0, buf.duration - e.offset); // durée jouable après le point de départ
+      const len = e.loop ? e.duration! : Math.min(e.duration ?? avail, avail);
       const end = e.start + len;
       if (end <= fromT) continue;
 
@@ -54,7 +55,7 @@ export class AudioPlayer {
       gain.gain.setValueAtTime(g(pts[0]), when);
       for (const u of pts.slice(1)) gain.gain.linearRampToValueAtTime(g(u), when + (u - u0));
 
-      src.start(when, e.loop ? u0 % buf.duration : u0);
+      src.start(when, e.loop ? (e.offset + u0) % buf.duration : e.offset + u0);
       src.stop(when + (len - u0));
       this.nodes.push(src);
     }

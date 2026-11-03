@@ -206,6 +206,7 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     $('play').click();
   } else if (e.code === 'Escape') {
+    audio.stop(); // arrête aussi une écoute de passage
     selectRef(null, false);
   } else if (e.code.startsWith('Arrow') && selRef?.position) {
     // flèches : déplacement fin de la sélection (Maj = 10 px)
@@ -367,9 +368,9 @@ const PRESETS: Record<string, any> = {
 const openEffects = new WeakSet<object>();
 
 /** Couleur : sélecteur + texte libre (rgba(), noms…). */
-function colorRow(label: string, o: any, key: string, def: string) {
+function colorRow(label: string, o: any, key: string, def: string, notify: () => unknown = changed) {
   const val = () => String(o[key] ?? def);
-  const text = textField(o, key, changed, { optional: true }) as HTMLInputElement;
+  const text = textField(o, key, notify as () => void, { optional: true }) as HTMLInputElement;
   text.placeholder = def;
   const pick = h('input', {
     type: 'color',
@@ -377,7 +378,7 @@ function colorRow(label: string, o: any, key: string, def: string) {
     oninput: (e: Event) => {
       o[key] = (e.target as HTMLInputElement).value;
       text.value = o[key];
-      void changed();
+      void notify();
     },
   });
   return row(label, pick, text);
@@ -388,36 +389,59 @@ function effectsForm(o: any): HTMLElement {
   const fx = (o.effects ??= {});
   const sh = (fx.shadow ??= {});
   const bd = (fx.border ??= {});
-  const active = Object.keys(fx).some((k) => (typeof fx[k] === 'object' ? Object.keys(fx[k]).length : true));
+
+  // Forme canonique des effets (objets vides retirés, clés triées) pour reconnaître un préréglage.
+  const canon = (e: any): string => {
+    const c = JSON.parse(JSON.stringify(e ?? {}));
+    for (const k of ['shadow', 'border']) if (c[k] && !Object.keys(c[k]).length) delete c[k];
+    const sort = (v: any): any =>
+      Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v;
+    return JSON.stringify(sort(c));
+  };
+  /** Préréglage correspondant aux effets actuels : aucun, l'un des préréglages, ou personnalisé. */
+  const current = () => {
+    const c = canon(fx);
+    return c === '{}' ? '__none' : Object.keys(PRESETS).find((p) => canon(PRESETS[p]) === c) ?? '__custom';
+  };
+  const active = current() !== '__none';
 
   const preset = h('select', {
     onchange: (e: Event) => {
       const v = (e.target as HTMLSelectElement).value;
-      if (!v) return;
+      if (v === '__custom') return;
       o.effects = v === '__none' ? {} : structuredClone(PRESETS[v]);
       openEffects.add(o);
       void rebuild();
     },
   },
-    h('option', { value: '' }, 'Choisir un préréglage…'),
-    ...Object.keys(PRESETS).map((p) => h('option', { value: p }, p)),
     h('option', { value: '__none' }, 'Aucun effet'),
-  );
+    ...Object.keys(PRESETS).map((p) => h('option', { value: p }, p)),
+    h('option', { value: '__custom', disabled: true }, 'Personnalisé'),
+  ) as HTMLSelectElement;
+  preset.value = current();
+
+  // Toute retouche fine remet le menu à jour (préréglage reconnu, ou « Personnalisé »).
+  const touch = () => {
+    preset.value = current();
+    summary.textContent = current() === '__none' ? 'Effets' : 'Effets ●';
+    return changed();
+  };
+  const summary = h('summary', {}, active ? 'Effets ●' : 'Effets');
 
   const d = h('details', { class: 'effects' },
-    h('summary', {}, active ? 'Effets ●' : 'Effets'),
+    summary,
     row('Préréglage', preset),
-    row('Opacité', numField(fx, 'opacity', changed, { min: 0, step: 0.05, optional: true })),
-    row('Rotation °', numField(fx, 'rotation', changed, { step: 0.5, optional: true })),
-    row('Coins arrondis', numField(fx, 'corner_radius', changed, { min: 0, step: 4, optional: true })),
-    row('Bords fondus', numField(fx, 'feather', changed, { min: 0, step: 5, optional: true })),
+    row('Opacité', numField(fx, 'opacity', touch, { min: 0, step: 0.05, optional: true })),
+    row('Rotation °', numField(fx, 'rotation', touch, { step: 0.5, optional: true })),
+    row('Coins arrondis', numField(fx, 'corner_radius', touch, { min: 0, step: 4, optional: true })),
+    row('Bords fondus', numField(fx, 'feather', touch, { min: 0, step: 5, optional: true })),
     h('div', { class: 'hint' }, 'Ombre'),
-    row('Flou', numField(sh, 'blur', changed, { min: 0, step: 2, optional: true })),
-    row('Décalage', numField(sh, 'x', changed, { step: 2, optional: true }), numField(sh, 'y', changed, { step: 2, optional: true })),
-    colorRow('Couleur', sh, 'color', 'rgba(0,0,0,0.6)'),
+    row('Flou', numField(sh, 'blur', touch, { min: 0, step: 2, optional: true })),
+    row('Décalage', numField(sh, 'x', touch, { step: 2, optional: true }), numField(sh, 'y', touch, { step: 2, optional: true })),
+    colorRow('Couleur', sh, 'color', 'rgba(0,0,0,0.6)', touch),
     h('div', { class: 'hint' }, 'Bordure / cadre'),
-    row('Épaisseur', numField(bd, 'width', changed, { min: 0, step: 1, optional: true }), selectField(bd, 'style', ['solid', 'double'], changed, { optional: true })),
-    colorRow('Couleur', bd, 'color', '#ffffff'),
+    row('Épaisseur', numField(bd, 'width', touch, { min: 0, step: 1, optional: true }), selectField(bd, 'style', ['solid', 'double'], touch, { optional: true })),
+    colorRow('Couleur', bd, 'color', '#ffffff', touch),
   ) as HTMLDetailsElement;
   d.open = active || openEffects.has(o);
   d.addEventListener('toggle', () => (d.open ? openEffects.add(o) : openEffects.delete(o)));
@@ -523,10 +547,22 @@ function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string,
   );
 }
 
+/** Écoute un passage audio seul, avec son offset, sa durée et ses fondus. */
+async function audition(a: any) {
+  if (!a.file) return;
+  pause();
+  await audio.preload([a.file], (f) => media.url(f));
+  await audio.start([{
+    file: a.file, start: 0, duration: a.duration ?? (a.loop ? 10 : undefined), volume: a.volume ?? 1,
+    loop: !!a.loop, fadeIn: a.fade_in ?? 0, fadeOut: a.fade_out ?? 0, offset: a.offset ?? 0,
+  }], 0);
+}
+
 function audioForm(o: any, title: string, onDelete: () => void) {
-  return fieldset({ key: o, title, rename: true }, [delBtn(onDelete)],
+  return fieldset({ key: o, title, rename: true }, [h('button', { class: 'small', title: 'Écouter ce passage seul (Échap pour arrêter)', onclick: () => audition(o) }, '▶'), delBtn(onDelete)],
     row('Fichier', textField(o, 'file', changed, { list: 'dl-audio', folder: 'audio' })),
-    row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true })),
+    row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'dans la scène')),
+    row('Lire dès (s)', numField(o, 'offset', changed, { min: 0, step: 0.1, optional: true }), h('span', { class: 'hint' }, 'dans le fichier')),
     row('Durée (s)', numField(o, 'duration', changed, { min: 0.1, optional: true })),
     row('Volume', numField(o, 'volume', changed, { min: 0, step: 0.05, optional: true })),
     row('Fondu', numField(o, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(o, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),

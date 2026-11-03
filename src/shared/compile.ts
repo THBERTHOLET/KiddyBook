@@ -43,6 +43,8 @@ export interface AudioEvent {
   loop: boolean;
   fadeIn: number;
   fadeOut: number;
+  /** Point de départ dans le fichier source (s). */
+  offset: number;
 }
 
 export interface Compiled {
@@ -115,6 +117,7 @@ export function compile(project: Project): Compiled {
         loop: !!a.loop,
         fadeIn: a.fade_in ?? 0,
         fadeOut: a.fade_out ?? 0,
+        offset: a.offset ?? 0,
       });
     }
 
@@ -150,6 +153,7 @@ export function compile(project: Project): Compiled {
       loop: !!a.loop,
       fadeIn: a.fade_in ?? 0,
       fadeOut: a.fade_out ?? 0,
+      offset: a.offset ?? 0,
     });
   }
 
