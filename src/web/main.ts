@@ -28,6 +28,23 @@ const setStatus = (msg: string, err = false) => {
   el.className = err ? 'err' : '';
 };
 
+/**
+ * JSON enregistré : copie du projet sans les objets d'effets vides (le formulaire en crée pour pouvoir
+ * y écrire ; on ne les retire qu'à l'enregistrement pour ne pas détacher les champs encore affichés).
+ */
+function serialize(): string {
+  const clone = JSON.parse(JSON.stringify(project)) as Project;
+  for (const sc of clone.timeline) {
+    for (const el of sc.elements ?? []) {
+      const fx = (el as any).effects;
+      if (!fx) continue;
+      for (const k of ['shadow', 'border']) if (fx[k] && !Object.keys(fx[k]).length) delete fx[k];
+      if (!Object.keys(fx).length) delete (el as any).effects;
+    }
+  }
+  return JSON.stringify(clone);
+}
+
 let saveTimer: number | undefined;
 function scheduleSave() {
   setStatus('Modifié…');
@@ -36,7 +53,7 @@ function scheduleSave() {
     const r = await fetch('/api/project', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(project),
+      body: serialize(),
     });
     if (r.ok) setStatus('Enregistré');
     else {
@@ -271,8 +288,55 @@ function renderInspector() {
   );
 }
 
-const fieldset = (title: string, extra: (Node | null)[], ...rows: HTMLElement[]) =>
-  h('fieldset', {}, h('legend', {}, title, ...extra), ...rows);
+/** Sections repliées, par objet du projet (survit aux reconstructions de l'inspecteur). */
+const collapsed = new WeakSet<object>();
+
+type Head = string | { key: object; title: string; rename?: boolean };
+
+/** Double-clic sur un libellé : l'édite. Vide ou identique au nom par défaut = retour au nom par défaut. */
+function editLabel(label: HTMLElement, o: any, def: string) {
+  const input = h('input', { type: 'text', value: o.name ?? def, class: 'sec-edit' }) as HTMLInputElement;
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit: boolean) => {
+    if (done) return;
+    done = true;
+    if (commit) {
+      const v = input.value.trim();
+      if (!v || v === def) delete o.name;
+      else o.name = v;
+    }
+    label.textContent = o.name ?? def;
+    input.replaceWith(label);
+    if (commit) void changed();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+/** Section d'inspecteur. Avec un `key`, elle est repliable ; avec `rename`, son titre se renomme au double-clic. */
+const fieldset = (head: Head, extra: (Node | null)[], ...rows: HTMLElement[]) => {
+  if (typeof head === 'string') return h('fieldset', {}, h('legend', {}, head, ...extra), ...rows);
+  const { key, title, rename } = head;
+  const fs = h('fieldset', { class: collapsed.has(key) ? 'collapsed' : '' });
+  const chevron = h('button', { class: 'small chevron', title: 'Replier / déplier' }, collapsed.has(key) ? '▸' : '▾');
+  chevron.addEventListener('click', () => {
+    const now = !collapsed.has(key);
+    now ? collapsed.add(key) : collapsed.delete(key);
+    fs.classList.toggle('collapsed', now);
+    chevron.textContent = now ? '▸' : '▾';
+  });
+  const label = h('span', { class: 'sec-title', title: rename ? 'Double-clic pour renommer' : undefined }, (key as any).name ?? title);
+  if (rename) label.addEventListener('dblclick', () => editLabel(label, key, title));
+  fs.append(h('legend', {}, chevron, label, ...extra), h('div', { class: 'sec-body' }, ...rows));
+  return fs;
+};
 
 const delBtn = (fn: () => void) => h('button', { class: 'small danger', title: 'Supprimer', onclick: fn }, '✕');
 
@@ -289,6 +353,75 @@ function timingRows(o: any, withDuration = true) {
     ...(withDuration ? [row('Durée (s)', numField(o, 'duration', changed, { min: 0.1, optional: true }))] : []),
     row('Fondu', numField(o, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(o, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
   ];
+}
+
+const PRESETS: Record<string, any> = {
+  'Bords adoucis': { feather: 60 },
+  'Ombre portée': { shadow: { color: 'rgba(0,0,0,0.55)', blur: 30, x: 0, y: 14 } },
+  'Coins arrondis + ombre': { corner_radius: 48, shadow: { color: 'rgba(0,0,0,0.5)', blur: 28, x: 0, y: 12 } },
+  'Cadre photo': { rotation: -2, border: { color: '#fffaf0', width: 18 }, shadow: { color: 'rgba(0,0,0,0.5)', blur: 30, x: 8, y: 14 } },
+  'Cadre doré': { border: { color: '#c9a227', width: 14, style: 'double' }, shadow: { color: 'rgba(0,0,0,0.5)', blur: 24, x: 0, y: 10 } },
+  'Halo lumineux': { corner_radius: 30, shadow: { color: '#ffd27a', blur: 70, x: 0, y: 0 } },
+};
+
+const openEffects = new WeakSet<object>();
+
+/** Couleur : sélecteur + texte libre (rgba(), noms…). */
+function colorRow(label: string, o: any, key: string, def: string) {
+  const val = () => String(o[key] ?? def);
+  const text = textField(o, key, changed, { optional: true }) as HTMLInputElement;
+  text.placeholder = def;
+  const pick = h('input', {
+    type: 'color',
+    value: /^#[0-9a-f]{6}$/i.test(val()) ? val() : '#000000',
+    oninput: (e: Event) => {
+      o[key] = (e.target as HTMLInputElement).value;
+      text.value = o[key];
+      void changed();
+    },
+  });
+  return row(label, pick, text);
+}
+
+/** Effets d'une image / vidéo : préréglages + réglages fins. */
+function effectsForm(o: any): HTMLElement {
+  const fx = (o.effects ??= {});
+  const sh = (fx.shadow ??= {});
+  const bd = (fx.border ??= {});
+  const active = Object.keys(fx).some((k) => (typeof fx[k] === 'object' ? Object.keys(fx[k]).length : true));
+
+  const preset = h('select', {
+    onchange: (e: Event) => {
+      const v = (e.target as HTMLSelectElement).value;
+      if (!v) return;
+      o.effects = v === '__none' ? {} : structuredClone(PRESETS[v]);
+      openEffects.add(o);
+      void rebuild();
+    },
+  },
+    h('option', { value: '' }, 'Choisir un préréglage…'),
+    ...Object.keys(PRESETS).map((p) => h('option', { value: p }, p)),
+    h('option', { value: '__none' }, 'Aucun effet'),
+  );
+
+  const d = h('details', { class: 'effects' },
+    h('summary', {}, active ? 'Effets ●' : 'Effets'),
+    row('Préréglage', preset),
+    row('Opacité', numField(fx, 'opacity', changed, { min: 0, step: 0.05, optional: true })),
+    row('Rotation °', numField(fx, 'rotation', changed, { step: 0.5, optional: true })),
+    row('Coins arrondis', numField(fx, 'corner_radius', changed, { min: 0, step: 4, optional: true })),
+    row('Bords fondus', numField(fx, 'feather', changed, { min: 0, step: 5, optional: true })),
+    h('div', { class: 'hint' }, 'Ombre'),
+    row('Flou', numField(sh, 'blur', changed, { min: 0, step: 2, optional: true })),
+    row('Décalage', numField(sh, 'x', changed, { step: 2, optional: true }), numField(sh, 'y', changed, { step: 2, optional: true })),
+    colorRow('Couleur', sh, 'color', 'rgba(0,0,0,0.6)'),
+    h('div', { class: 'hint' }, 'Bordure / cadre'),
+    row('Épaisseur', numField(bd, 'width', changed, { min: 0, step: 1, optional: true }), selectField(bd, 'style', ['solid', 'double'], changed, { optional: true })),
+    colorRow('Couleur', bd, 'color', '#ffffff'),
+  ) as HTMLDetailsElement;
+  d.open = active || openEffects.has(o);
+  d.addEventListener('toggle', () => (d.open ? openEffects.add(o) : openEffects.delete(o)));
+  return d;
 }
 
 /** Formulaire d'une couche, lié à la sélection sur le canvas. */
@@ -369,28 +502,29 @@ function sizeHelpers(o: any, kind: 'image' | 'video'): HTMLElement[] {
 
 function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDelete?: () => void, onMove?: (d: number) => void) {
   const extra = [
-    ...(onMove ? [h('button', { class: 'small', onclick: () => onMove(-1) }, '↑'), h('button', { class: 'small', onclick: () => onMove(1) }, '↓')] : []),
+    ...(onMove ? [h('button', { class: 'small', title: 'Monter dans la liste (plus au fond)', onclick: () => onMove(-1) }, '↑'), h('button', { class: 'small', title: 'Descendre dans la liste (plus devant)', onclick: () => onMove(1) }, '↓')] : []),
     ...(onDelete ? [delBtn(onDelete)] : []),
   ];
   if (kind === 'text') {
-    return fieldset(title, extra,
+    return fieldset({ key: o, title, rename: true }, extra,
       row('Style', selectField(o, 'style', Object.keys(project.styles), changed)),
       areaField(o, 'content', changed),
       row('Position', ...vecField(o, 'position', changed)),
       ...timingRows(o),
     );
   }
-  return fieldset(title, extra,
+  return fieldset({ key: o, title, rename: true }, extra,
     row('Fichier', textField(o, 'file', changed, { list: kind === 'image' ? 'dl-img' : 'dl-video', folder: 'illustrations' })),
     row('Position', ...vecField(o, 'position', changed)),
     row('Taille', ...vecField(o, 'size', changed, { optional: true })),
     ...sizeHelpers(o, kind),
+    effectsForm(o),
     ...timingRows(o),
   );
 }
 
 function audioForm(o: any, title: string, onDelete: () => void) {
-  return fieldset(title, [delBtn(onDelete)],
+  return fieldset({ key: o, title, rename: true }, [delBtn(onDelete)],
     row('Fichier', textField(o, 'file', changed, { list: 'dl-audio', folder: 'audio' })),
     row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true })),
     row('Durée (s)', numField(o, 'duration', changed, { min: 0.1, optional: true })),
@@ -406,8 +540,19 @@ function scenePane(): HTMLElement[] {
   const defaultPos = (): [number, number] => [project.project.resolution[0] / 2, project.project.resolution[1] * 0.85];
   const firstStyle = Object.keys(project.styles)[0] ?? '';
 
+  const sections = () => [s, s.illustration, ...(s.elements ?? []), ...(s.texts ?? []), ...(s.audio ?? []), s.transition_to_next].filter(Boolean) as object[];
+  const foldAll = (fold: boolean) => () => {
+    for (const k of sections()) fold ? collapsed.add(k) : collapsed.delete(k);
+    renderInspector();
+  };
+
   const out: HTMLElement[] = [
-    fieldset(`Scène ${selScene + 1}`, [
+    h('div', { class: 'btnrow' },
+      h('button', { class: 'small', onclick: foldAll(true) }, '▸ Tout replier'),
+      h('button', { class: 'small', onclick: foldAll(false) }, '▾ Tout déplier'),
+      h('span', { class: 'hint' }, 'Double-clic sur un titre pour le renommer'),
+    ),
+    fieldset({ key: s, title: `Scène ${selScene + 1}` }, [
       h('button', { class: 'small', onclick: () => moveItem(tl, selScene, -1) && (selScene--, rebuild()) }, '↑'),
       h('button', { class: 'small', onclick: () => moveItem(tl, selScene, 1) && (selScene++, rebuild()) }, '↓'),
       h('button', { class: 'small', title: 'Dupliquer', onclick: () => (tl.splice(selScene + 1, 0, structuredClone(s)), selScene++, rebuild()) }, '⧉'),
@@ -422,21 +567,31 @@ function scenePane(): HTMLElement[] {
   ];
 
   // illustration
-  if (s.illustration) out.push(layerForm(s.illustration, 'image', 'Illustration', () => (delete s.illustration, rebuild())));
-  else out.push(h('button', { onclick: () => ((s.illustration = { file: '', position: [460, 140], size: [1000, 640], start: 0.3, fade_in: 0.5 }), rebuild()) }, '+ Illustration'));
-
-  // éléments (couverture, vidéos, images libres)
+  // `illustration` est la première image de la scène ; les suivantes sont des éléments de type image.
+  // Images, vidéos et textes libres : un seul empilement, le premier de la liste est au fond.
+  const count = { image: 0, video: 0, text: 0 };
+  out.push(h('div', { class: 'hint' }, 'Ordre d’empilement : le premier de la liste est au fond (↑ vers le fond, ↓ vers l’avant).'));
   (s.elements ??= []).forEach((e, i) => {
     const kind = 'file' in e ? (e.type === 'video' ? 'video' : 'image') : 'text';
-    out.push(layerForm(e, kind, `Élément ${i + 1} (${kind})`, () => (s.elements!.splice(i, 1), rebuild()), (d) => moveItem(s.elements!, i, d) && rebuild()));
+    const label = { image: 'Illustration', video: 'Vidéo', text: 'Texte' }[kind];
+    out.push(layerForm(e, kind, `${label} ${++count[kind]}`, () => (s.elements!.splice(i, 1), rebuild()), (d) => moveItem(s.elements!, i, d) && rebuild()));
   });
+
+  const addIllustration = () => {
+    const n = count.image; // décale légèrement chaque nouvelle image pour qu'elles ne se superposent pas
+    const img = { type: 'image' as const, file: '', position: [460 + 40 * n, 140 + 40 * n] as [number, number], size: [1000, 640] as [number, number], start: 0.3, fade_in: 0.5 };
+    s.elements!.push(img);
+    selRef = img;
+    void rebuild();
+  };
 
   // textes
   (s.texts ??= []).forEach((e, i) =>
     out.push(layerForm(e, 'text', `Texte ${i + 1}`, () => (s.texts!.splice(i, 1), rebuild()), (d) => moveItem(s.texts!, i, d) && rebuild())),
   );
   out.push(
-    h('div', { class: 'row' },
+    h('div', { class: 'btnrow' },
+      h('button', { onclick: addIllustration }, '+ Illustration'),
       h('button', { onclick: () => (s.texts!.push({ style: firstStyle, content: 'Nouveau texte', position: defaultPos(), start: 0.5, fade_in: 0.5 }), rebuild()) }, '+ Texte'),
       h('button', { onclick: () => (s.elements!.push({ type: 'video', file: '', position: [0, 0], size: project.project.resolution }), rebuild()) }, '+ Vidéo'),
     ),
@@ -449,7 +604,7 @@ function scenePane(): HTMLElement[] {
   // transition
   if (s.transition_to_next) {
     const tr = s.transition_to_next;
-    out.push(fieldset('Transition vers la suivante', [delBtn(() => (delete s.transition_to_next, rebuild()))],
+    out.push(fieldset({ key: tr, title: 'Transition vers la suivante' }, [delBtn(() => (delete s.transition_to_next, rebuild()))],
       row('Vidéo', textField(tr, 'file', changed, { list: 'dl-video', folder: 'transitions' })),
       row('Durée (s)', numField(tr, 'duration', changed, { min: 0.1 })),
       row('Décalage', numField(tr, 'offset', changed, { optional: true }), h('span', { class: 'hint' }, 'vs fin de scène')),
@@ -461,7 +616,7 @@ function scenePane(): HTMLElement[] {
 
 function stylesPane(): HTMLElement[] {
   const out = Object.entries(project.styles).map(([name, st]) =>
-    fieldset(name, [
+    fieldset({ key: st, title: name }, [
       h('button', { class: 'small', title: 'Renommer', onclick: () => renameStyle(name) }, '✎'),
       delBtn(() => {
         if (!confirm(`Supprimer le style « ${name} » ?`)) return;
@@ -585,7 +740,7 @@ $('export-btn').onclick = () => {
     );
 
   const start = async () => {
-    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(project) });
+    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: serialize() });
     const r = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -832,6 +987,7 @@ function fitViewport() {
   drawOverlay();
 }
 new ResizeObserver(fitViewport).observe(document.querySelector('.stage')!);
+window.addEventListener('resize', fitViewport);
 
 const toProject = (e: PointerEvent): [number, number] => {
   const r = overlay.getBoundingClientRect();
@@ -891,6 +1047,7 @@ overlay.addEventListener('pointerdown', (e) => {
   if (l.ref !== selRef) {
     tab = 'scene';
     selRef = l.ref;
+    collapsed.delete(l.ref); // la section de l'élément cliqué est dépliée
     renderInspector();
     document.querySelector('#inspector fieldset.selected')?.scrollIntoView({ block: 'nearest' });
   }
@@ -966,7 +1123,7 @@ async function switchProject(url: string, body: object) {
   // sauvegarde immédiate des modifications en attente avant de changer de projet
   if (saveTimer) {
     clearTimeout(saveTimer);
-    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(project) });
+    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: serialize() });
   }
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (r.ok) location.reload();
@@ -990,9 +1147,16 @@ async function initProjects() {
 (async () => {
   await initProjects();
   project = await (await fetch('/api/project')).json();
+  // ancien format : `illustration` devient le premier élément (le plus au fond), pour pouvoir le réordonner
+  for (const sc of project.timeline) {
+    if (!sc.illustration) continue;
+    (sc.elements ??= []).unshift({ type: 'image', ...sc.illustration });
+    delete sc.illustration;
+  }
   compiled = compile(project);
   await refreshAssets();
   await changed();
   renderInspector();
+  fitViewport();
   setStatus('Chargé');
 })();

@@ -27,6 +27,16 @@ main { grid-area: m; display: flex; flex-direction: column; min-width: 0; paddin
 #drop-overlay > div.over { border-color: var(--accent); background: rgba(240,165,60,.18); }
 input.dropping { border-color: var(--accent); background: rgba(240,165,60,.18); }
 fieldset.selected { border-color: var(--accent); }
+details.effects { display: flex; flex-direction: column; gap: 6px; border: 1px dashed var(--line); border-radius: 6px; padding: 6px 8px; }
+details.effects[open] > summary { margin-bottom: 6px; }
+details.effects > summary { cursor: pointer; color: var(--accent); }
+input[type=color] { width: 34px; padding: 0 2px; height: 24px; flex: none; }
+.sec-body { display: flex; flex-direction: column; gap: 6px; }
+fieldset.collapsed .sec-body { display: none; }
+fieldset.collapsed { padding-bottom: 2px; }
+.chevron { border: 0; background: none; padding: 0 3px; color: var(--muted); }
+.sec-title { cursor: text; user-select: none; }
+.sec-edit { width: 150px; padding: 1px 5px; color: var(--accent); }
 .btnrow { display: flex; flex-wrap: wrap; gap: 5px; }
 .dropzone { border: 2px dashed var(--line); border-radius: 8px; padding: 18px 10px; text-align: center; color: var(--muted); }
 .dropzone.over { border-color: var(--accent); color: var(--text); background: rgba(240,165,60,.12); }

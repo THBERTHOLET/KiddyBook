@@ -1,4 +1,4 @@
-import type { Project, Scene } from './schema';
+import type { Effects, Project, Scene } from './schema';
 
 interface LayerBase {
   /** Objet du projet dont la couche est issue (permet à l'éditeur de le modifier). */
@@ -12,7 +12,7 @@ interface LayerBase {
 export type Layer = LayerBase &
   (
     | { kind: 'text'; style: string; content: string; pos: [number, number] }
-    | { kind: 'image' | 'video'; file: string; pos: [number, number]; size?: [number, number] }
+    | { kind: 'image' | 'video'; file: string; pos: [number, number]; size?: [number, number]; effects?: Effects }
   );
 
 export interface CompiledScene {
@@ -83,6 +83,7 @@ export function compile(project: Project): Compiled {
         file: e.file,
         pos: e.position,
         size: e.size,
+        effects: e.effects,
         ...timed(e, scene.duration),
       });
       (kind === 'image' ? files.images : files.videos).add(e.file);

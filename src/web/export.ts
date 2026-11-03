@@ -2,7 +2,7 @@
 import { compile } from '../shared/compile';
 import { Media } from '../shared/media';
 import { renderFrame } from '../shared/render';
-import { ProjectSchema } from '../shared/schema';
+import { fontFamily, ProjectSchema } from '../shared/schema';
 
 const w = window as any;
 
@@ -14,7 +14,7 @@ const w = window as any;
   await media.loadFonts(assets);
   // force le chargement des polices utilisées par les styles
   await Promise.all(
-    Object.values(project.styles).map((s) => document.fonts.load(`${s.size}px "${s.font}"`).catch(() => [])),
+    Object.values(project.styles).map((s) => document.fonts.load(`${s.size}px "${fontFamily(s.font)}"`).catch(() => [])),
   );
   await media.preload(c);
 
