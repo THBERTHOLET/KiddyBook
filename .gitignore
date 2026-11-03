@@ -1,0 +1,7 @@
+node_modules/
+dist/
+projects/*/exports/
+projects/*/assets/
+*.log
+dev.log
+dev.err

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KiddyBooks</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <strong>KiddyBooks</strong>
+      <span id="status"></span>
+      <span class="spacer"></span>
+      <button id="export-btn" class="primary">Exporter en MP4</button>
+    </header>
+    <aside id="scenes"></aside>
+    <main>
+      <div class="stage"><canvas id="canvas"></canvas></div>
+      <div class="transport">
+        <button id="play">▶</button>
+        <span id="time">0:00.0 / 0:00.0</span>
+        <label><input type="checkbox" id="safe" /> zones de sécurité</label>
+      </div>
+      <div id="timeline"></div>
+    </main>
+    <aside id="inspector"></aside>
+    <div id="export-dialog" hidden></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

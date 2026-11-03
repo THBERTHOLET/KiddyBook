@@ -1,0 +1,62 @@
+:root {
+  --bg: #17171c; --panel: #1f2027; --panel2: #272933; --line: #34364a;
+  --text: #e8e8ee; --muted: #9a9cb0; --accent: #f0a53c; --danger: #e5584f;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif;
+  display: grid; grid-template-columns: 230px 1fr 340px; grid-template-rows: 44px 1fr;
+  grid-template-areas: "h h h" "s m i";
+}
+header { grid-area: h; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header .spacer { flex: 1; }
+#status { color: var(--muted); }
+#status.err { color: var(--danger); }
+#scenes { grid-area: s; overflow: auto; background: var(--panel); border-right: 1px solid var(--line); padding: 8px; }
+#inspector { grid-area: i; overflow: auto; background: var(--panel); border-left: 1px solid var(--line); }
+main { grid-area: m; display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 10px; }
+.stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.stage canvas { max-width: 100%; max-height: 100%; aspect-ratio: 16/9; background: #000; box-shadow: 0 0 0 1px var(--line); }
+.transport { display: flex; align-items: center; gap: 14px; }
+.transport label { color: var(--muted); margin-left: auto; }
+#timeline { position: relative; display: flex; height: 38px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; overflow: hidden; }
+#timeline .seg { border-right: 1px solid var(--bg); padding: 2px 6px; font-size: 11px; color: var(--muted); overflow: hidden; white-space: nowrap; background: var(--panel2); }
+#timeline .seg.sel { background: #3a3326; color: var(--accent); }
+#timeline .head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
+
+button, select, input, textarea { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; }
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+button.small { padding: 1px 6px; }
+input[type=number] { width: 72px; }
+input[type=checkbox] { width: auto; }
+textarea { width: 100%; min-height: 56px; resize: vertical; }
+
+.scene-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.scene-item:hover { background: var(--panel2); }
+.scene-item.sel { border-color: var(--accent); background: var(--panel2); }
+.scene-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-item .dur { color: var(--muted); font-size: 11px; }
+.add-row { display: flex; gap: 6px; margin-top: 8px; }
+
+.tabs { display: flex; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 2; }
+.tabs button { flex: 1; border: 0; border-radius: 0; background: none; padding: 9px 2px; color: var(--muted); }
+.tabs button.on { color: var(--accent); box-shadow: inset 0 -2px var(--accent); }
+.pane { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0; padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+legend { color: var(--accent); padding: 0 6px; display: flex; gap: 8px; align-items: center; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row > label { width: 78px; color: var(--muted); flex: none; }
+.row > .ctl { display: flex; gap: 6px; flex: 1; min-width: 0; }
+.row > .ctl > input:not([type=number]), .row > .ctl > select { flex: 1; min-width: 0; }
+.hint { color: var(--muted); font-size: 12px; }
+
+#export-dialog { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 10; }
+#export-dialog[hidden] { display: none; }
+#export-dialog .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; width: 460px; display: flex; flex-direction: column; gap: 12px; }
+progress { width: 100%; height: 14px; }
+.warn { color: var(--accent); font-size: 12px; max-height: 120px; overflow: auto; }
+.errtext { color: var(--danger); font-size: 12px; white-space: pre-wrap; }

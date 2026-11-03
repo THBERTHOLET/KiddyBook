@@ -1,0 +1,138 @@
+{
+  "project": {
+    "fps": 30,
+    "resolution": [
+      1920,
+      1080
+    ],
+    "output_file": "livre_enfants_ep1.mp4"
+  },
+  "styles": {
+    "title_main": {
+      "font": "Merriweather-Bold",
+      "size": 64,
+      "color": "#e6d5b8",
+      "anchor": "center"
+    },
+    "narrative_body": {
+      "font": "Merriweather",
+      "size": 32,
+      "color": "#3d2314",
+      "anchor": "center"
+    },
+    "chapter_number": {
+      "font": "Cinzel-Regular",
+      "size": 24,
+      "color": "#8c6239",
+      "anchor": "center"
+    }
+  },
+  "global_audio_tracks": [
+    {
+      "file": "assets/audio/background_music.mp3",
+      "start": 0,
+      "volume": 0.15,
+      "loop": true,
+      "fade_in": 2,
+      "fade_out": 3
+    }
+  ],
+  "timeline": [
+    {
+      "type": "cover",
+      "background": "assets/backgrounds/couverture_grimoire.png",
+      "duration": 5,
+      "fade_in": 1,
+      "fade_out": 0.8,
+      "elements": [
+        {
+          "type": "text",
+          "style": "title_main",
+          "content": "Les Contes de la Forêt",
+          "position": [
+            960,
+            400
+          ],
+          "start": 0.5,
+          "duration": 4.5,
+          "fade_in": 0.8
+        }
+      ],
+      "audio": [
+        {
+          "file": "assets/audio/magic_bell.mp3",
+          "start": 0.5,
+          "volume": 0.8
+        }
+      ],
+      "transition_to_next": {
+        "type": "video_overlay",
+        "file": "assets/transitions/cover_open.webm",
+        "duration": 1.2
+      },
+      "texts": []
+    },
+    {
+      "type": "page",
+      "page_index": 1,
+      "background": "assets/backgrounds/page_interieure.png",
+      "duration": 8,
+      "illustration": {
+        "file": "assets/illustrations/scene_1.png",
+        "position": [
+          450,
+          250
+        ],
+        "size": [
+          900,
+          600
+        ],
+        "start": 0.3,
+        "fade_in": 0.5
+      },
+      "texts": [
+        {
+          "style": "narrative_body",
+          "content": "Il était une fois, au cœur des bois endormis...",
+          "position": [
+            960,
+            900
+          ],
+          "start": 0.5,
+          "duration": 4,
+          "fade_in": 0.5,
+          "fade_out": 0.5
+        },
+        {
+          "style": "narrative_body",
+          "content": "...un petit écureuil nommé Noisette.",
+          "position": [
+            960,
+            950
+          ],
+          "start": 4.8,
+          "duration": 3,
+          "fade_in": 0.5
+        }
+      ],
+      "audio": [
+        {
+          "file": "assets/audio/narration_page1.mp3",
+          "start": 0.5,
+          "volume": 1
+        },
+        {
+          "file": "assets/audio/sfx_wind.mp3",
+          "start": 1,
+          "volume": 0.3,
+          "duration": 4
+        }
+      ],
+      "transition_to_next": {
+        "type": "video_overlay",
+        "file": "assets/transitions/page_turn_right.webm",
+        "duration": 0.8
+      }
+    }
+  ]
+}
