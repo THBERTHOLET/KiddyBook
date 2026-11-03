@@ -1,6 +1,6 @@
-import { compile, sceneAt, type Compiled } from '../shared/compile';
+import { compile, sceneAt, type Compiled, type Layer } from '../shared/compile';
 import { Media } from '../shared/media';
-import { renderFrame } from '../shared/render';
+import { layoutText, renderFrame } from '../shared/render';
 import { ProjectSchema, type Project, type Scene } from '../shared/schema';
 import { AudioPlayer } from './audio';
 import { areaField, checkField, fmtTime, h, numField, row, selectField, textField, vecField } from './ui';
@@ -71,6 +71,7 @@ async function refreshAssets() {
 async function changed() {
   const parsed = ProjectSchema.safeParse(project);
   compiled = compile(project);
+  fitViewport();
   const wasPlaying = playing;
   if (wasPlaying) pause();
   await Promise.all([
@@ -98,8 +99,12 @@ async function rebuild() {
 // ---------- aperçu ----------
 
 let drawing = false;
+let pendingDraw: boolean | null = null; // image demandée pendant un rendu en cours (valeur = exact)
 async function draw(exact = true) {
-  if (drawing) return;
+  if (drawing) {
+    pendingDraw = exact || !!pendingDraw;
+    return;
+  }
   drawing = true;
   try {
     const [W, H] = project.project.resolution;
@@ -113,9 +118,15 @@ async function draw(exact = true) {
   } finally {
     drawing = false;
   }
+  drawOverlay();
   $('time').textContent = `${fmtTime(t)} / ${fmtTime(compiled.total)}`;
   const head = document.querySelector<HTMLElement>('#timeline .head');
   if (head) head.style.left = `${(t / compiled.total) * 100}%`;
+  if (pendingDraw !== null) {
+    const again = pendingDraw;
+    pendingDraw = null;
+    await draw(again);
+  }
 }
 
 function drawSafe(W: number, H: number) {
@@ -173,9 +184,19 @@ async function seek(newT: number) {
 $('play').onclick = () => (playing ? pause() : play());
 $('safe').onchange = () => draw();
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+  if (e.code === 'Space') {
     e.preventDefault();
     $('play').click();
+  } else if (e.code === 'Escape') {
+    selectRef(null, false);
+  } else if (e.code.startsWith('Arrow') && selRef?.position) {
+    // flèches : déplacement fin de la sélection (Maj = 10 px)
+    e.preventDefault();
+    const d = e.shiftKey ? 10 : 1;
+    const [x, y] = selRef.position as [number, number];
+    selRef.position = [x + (e.code === 'ArrowRight' ? d : e.code === 'ArrowLeft' ? -d : 0), y + (e.code === 'ArrowDown' ? d : e.code === 'ArrowUp' ? -d : 0)];
+    void changed().then(() => tab === 'scene' && renderInspector());
   }
 });
 
@@ -196,6 +217,7 @@ function renderSceneList() {
           onclick: () => {
             selScene = i;
             tab = 'scene';
+            renderSceneList();
             void seek(compiled.scenes[i].start);
             renderInspector();
           },
@@ -269,7 +291,83 @@ function timingRows(o: any, withDuration = true) {
   ];
 }
 
+/** Formulaire d'une couche, lié à la sélection sur le canvas. */
 function layerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDelete?: () => void, onMove?: (d: number) => void) {
+  const fs = buildLayerForm(o, kind, title, onDelete, onMove);
+  (fs as any)._ref = o;
+  fs.addEventListener('focusin', () => selectRef(o, false));
+  if (o === selRef) fs.classList.add('selected');
+  return fs;
+}
+
+function naturalOf(file: string, kind: 'image' | 'video'): [number, number] {
+  const src = kind === 'image' ? media.images.get(file) : media.videos.get(file);
+  if (src instanceof HTMLVideoElement) return [src.videoWidth, src.videoHeight];
+  return src ? [src.naturalWidth, src.naturalHeight] : [0, 0];
+}
+
+let pctBase: 'orig' | 'w' | 'h' = 'orig';
+
+/** Boutons et champ % pour dimensionner une image / vidéo en gardant ses proportions. */
+function sizeHelpers(o: any, kind: 'image' | 'video'): HTMLElement[] {
+  const [W, H] = project.project.resolution;
+  const [nw, nh] = naturalOf(o.file, kind);
+  const known = nw > 0 && nh > 0;
+  const cur: [number, number] = o.size ?? (known ? [nw, nh] : [400, 300]);
+  const place = (x: number, y: number, w: number, h: number) => {
+    o.position = [Math.round(x), Math.round(y)];
+    o.size = [Math.round(w), Math.round(h)];
+    void rebuild();
+  };
+  const fit = (cover: boolean) => () => {
+    const s = (cover ? Math.max : Math.min)(W / nw, H / nh);
+    place((W - nw * s) / 2, (H - nh * s) / 2, nw * s, nh * s);
+  };
+  const btn = (label: string, title: string, fn: () => void, needsSize = false) =>
+    h('button', { class: 'small', title, disabled: needsSize && !known, onclick: fn }, label);
+
+  const refW = () => (pctBase === 'orig' ? nw : pctBase === 'w' ? W : H * (nw / nh));
+  const pctVal = known ? Math.round((cur[0] / refW()) * 1000) / 10 : '';
+  const pct = h('input', {
+    type: 'number', step: 5, min: 1, value: pctVal, disabled: !known,
+    onchange: (e: Event) => {
+      const p = Number((e.target as HTMLInputElement).value);
+      if (!(p > 0)) return;
+      const w = (refW() * p) / 100;
+      const hh = w * (nh / nw);
+      const cx = o.position[0] + cur[0] / 2;
+      const cy = o.position[1] + cur[1] / 2;
+      place(cx - w / 2, cy - hh / 2, w, hh); // recentré sur l'ancien centre
+    },
+  });
+  const base = h('select', {
+    onchange: (e: Event) => {
+      pctBase = (e.target as HTMLSelectElement).value as typeof pctBase;
+      void rebuild();
+    },
+  },
+    h('option', { value: 'orig' }, 'de l’original'),
+    h('option', { value: 'w' }, 'de la largeur écran'),
+    h('option', { value: 'h' }, 'de la hauteur écran'),
+  ) as HTMLSelectElement;
+  base.value = pctBase;
+
+  return [
+    h('div', { class: 'btnrow' },
+      btn('Étirer plein écran', 'Remplit tout l’écran, proportions ignorées', () => place(0, 0, W, H)),
+      btn('Ajuster', 'Tient entièrement dans l’écran, proportions gardées', fit(false), true),
+      btn('Remplir', 'Couvre tout l’écran, proportions gardées (rogne)', fit(true), true),
+      btn('Centrer', 'Centre sans changer la taille', () => {
+        o.position = [Math.round((W - cur[0]) / 2), Math.round((H - cur[1]) / 2)];
+        void rebuild();
+      }),
+      btn('Original', 'Taille d’origine du fichier', () => { delete o.size; void rebuild(); }, true),
+    ),
+    row('Échelle %', pct, base),
+  ];
+}
+
+function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDelete?: () => void, onMove?: (d: number) => void) {
   const extra = [
     ...(onMove ? [h('button', { class: 'small', onclick: () => onMove(-1) }, '↑'), h('button', { class: 'small', onclick: () => onMove(1) }, '↓')] : []),
     ...(onDelete ? [delBtn(onDelete)] : []),
@@ -283,16 +381,17 @@ function layerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDe
     );
   }
   return fieldset(title, extra,
-    row('Fichier', textField(o, 'file', changed, { list: kind === 'image' ? 'dl-img' : 'dl-video' })),
+    row('Fichier', textField(o, 'file', changed, { list: kind === 'image' ? 'dl-img' : 'dl-video', folder: 'illustrations' })),
     row('Position', ...vecField(o, 'position', changed)),
     row('Taille', ...vecField(o, 'size', changed, { optional: true })),
+    ...sizeHelpers(o, kind),
     ...timingRows(o),
   );
 }
 
 function audioForm(o: any, title: string, onDelete: () => void) {
   return fieldset(title, [delBtn(onDelete)],
-    row('Fichier', textField(o, 'file', changed, { list: 'dl-audio' })),
+    row('Fichier', textField(o, 'file', changed, { list: 'dl-audio', folder: 'audio' })),
     row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true })),
     row('Durée (s)', numField(o, 'duration', changed, { min: 0.1, optional: true })),
     row('Volume', numField(o, 'volume', changed, { min: 0, step: 0.05, optional: true })),
@@ -316,7 +415,7 @@ function scenePane(): HTMLElement[] {
     ],
       row('Type', selectField(s, 'type', ['cover', 'page', 'end'], rebuild)),
       row('N° de page', numField(s, 'page_index', changed, { step: 1, optional: true })),
-      row('Fond', textField(s, 'background', changed, { list: 'dl-img', optional: true })),
+      row('Fond', textField(s, 'background', changed, { list: 'dl-img', optional: true, folder: 'backgrounds' })),
       row('Durée (s)', numField(s, 'duration', changed, { min: 0.5 })),
       row('Fondu', numField(s, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(s, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
     ),
@@ -351,7 +450,7 @@ function scenePane(): HTMLElement[] {
   if (s.transition_to_next) {
     const tr = s.transition_to_next;
     out.push(fieldset('Transition vers la suivante', [delBtn(() => (delete s.transition_to_next, rebuild()))],
-      row('Vidéo', textField(tr, 'file', changed, { list: 'dl-video' })),
+      row('Vidéo', textField(tr, 'file', changed, { list: 'dl-video', folder: 'transitions' })),
       row('Durée (s)', numField(tr, 'duration', changed, { min: 0.1 })),
       row('Décalage', numField(tr, 'offset', changed, { optional: true }), h('span', { class: 'hint' }, 'vs fin de scène')),
     ));
@@ -370,7 +469,7 @@ function stylesPane(): HTMLElement[] {
         void rebuild();
       }),
     ],
-      row('Police', textField(st, 'font', changed, { list: 'dl-font' })),
+      row('Police', textField(st, 'font', changed, { list: 'dl-font', folder: 'fonts' })),
       row('Taille', numField(st, 'size', changed, { step: 1, min: 1 })),
       row('Couleur', h('input', { type: 'color', value: st.color, oninput: (e: Event) => ((st.color = (e.target as HTMLInputElement).value), changed()) }), textField(st, 'color', changed)),
       row('Ancrage', selectField(st, 'anchor', ['left', 'center', 'right'], changed, { optional: true })),
@@ -409,31 +508,49 @@ function audioPane(): HTMLElement[] {
 const FOLDERS = ['backgrounds', 'illustrations', 'audio', 'transitions', 'fonts'];
 
 function mediaPane(): HTMLElement[] {
-  const folder = h('select', {}, ...FOLDERS.map((f) => h('option', { value: f }, f))) as HTMLSelectElement;
+  const folder = h('select', {}, h('option', { value: '' }, 'automatique (selon le type)'), ...FOLDERS.map((f) => h('option', { value: f }, f))) as HTMLSelectElement;
   const input = h('input', { type: 'file', multiple: true }) as HTMLInputElement;
   const msg = h('div', { class: 'hint' });
+
+  const importFiles = async (files: File[]) => {
+    for (const f of files) {
+      const k = kindOf(f.name);
+      if (!k) {
+        msg.textContent = `Type non géré : ${f.name}`;
+        continue;
+      }
+      msg.textContent = `Envoi de ${f.name}…`;
+      await uploadFile(f, folder.value || defaultFolder(k));
+    }
+    msg.textContent = 'Terminé.';
+    await refreshAssets();
+    await changed();
+    renderInspector();
+  };
+
+  const zone = h('div', { class: 'dropzone' }, 'Déposez vos fichiers ici (images, vidéos, audio, polices)');
+  zone.addEventListener('dragover', (e) => (e.preventDefault(), zone.classList.add('over')));
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('over');
+    void importFiles(Array.from((e as DragEvent).dataTransfer?.files ?? []));
+  });
+
   return [
-    h('p', { class: 'hint' }, 'Importez vos fichiers dans le dossier assets/ du projet. Les polices sont reconnues par leur nom de fichier (Merriweather-Bold.ttf → « Merriweather-Bold »).'),
+    h('p', { class: 'hint' }, 'Les fichiers vont dans assets/ du projet. Vous pouvez aussi les déposer directement sur l’aperçu ou sur un champ « Fichier ». Les polices sont reconnues par leur nom de fichier (Merriweather-Bold.ttf → « Merriweather-Bold »).'),
+    zone,
     row('Dossier', folder),
     input,
-    h('button', {
-      class: 'primary',
-      onclick: async () => {
-        for (const f of Array.from(input.files ?? [])) {
-          const path = `assets/${folder.value}/${f.name}`;
-          msg.textContent = `Envoi de ${f.name}…`;
-          await fetch(`/api/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body: f });
-          media.invalidate(path);
-          audio.invalidate(path);
-        }
-        msg.textContent = 'Terminé.';
-        await refreshAssets();
-        await changed();
-        renderInspector();
-      },
-    }, 'Importer'),
+    h('button', { class: 'primary', onclick: () => importFiles(Array.from(input.files ?? [])) }, 'Importer'),
     msg,
-    h('fieldset', {}, h('legend', {}, `Fichiers (${assets.length})`), ...assets.map((a) => h('div', { class: 'hint' }, a))),
+    h('fieldset', {}, h('legend', {}, `Fichiers (${assets.length})`),
+      h('div', { class: 'hint' }, 'Glissez un fichier vers l’aperçu ou un champ.'),
+      ...assets.map((a) => {
+        const d = h('div', { class: 'hint asset', draggable: true }, a);
+        d.addEventListener('dragstart', (e) => (e as DragEvent).dataTransfer?.setData('text/asset', a));
+        return d;
+      })),
   ];
 }
 
@@ -502,9 +619,376 @@ $('export-btn').onclick = () => {
   showForm();
 };
 
+// ---------- fichiers : import et glisser-déposer ----------
+
+type Kind = 'image' | 'video' | 'audio' | 'font';
+const kindOf = (name: string): Kind | null =>
+  /\.(png|jpe?g|webp|gif)$/i.test(name) ? 'image'
+  : /\.(webm|mp4|mov|m4v)$/i.test(name) ? 'video'
+  : /\.(mp3|wav|ogg|m4a|flac)$/i.test(name) ? 'audio'
+  : /\.(ttf|otf|woff2?)$/i.test(name) ? 'font'
+  : null;
+const defaultFolder = (k: Kind) => ({ image: 'illustrations', video: 'illustrations', audio: 'audio', font: 'fonts' })[k];
+
+async function uploadFile(file: File, folder: string): Promise<string> {
+  const path = `assets/${folder}/${file.name}`;
+  const r = await fetch(`/api/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body: file });
+  if (!r.ok) throw new Error((await r.json()).error);
+  media.invalidate(path);
+  audio.invalidate(path);
+  return path;
+}
+
+/** Fichiers déposés (envoyés au serveur) ou asset glissé depuis la liste → chemins d'assets. */
+async function resolveDrop(e: DragEvent, folderFor: (k: Kind) => string | undefined = () => undefined): Promise<string[]> {
+  // à lire avant tout `await` : le DataTransfer est vidé après l'événement
+  const asset = e.dataTransfer?.getData('text/asset');
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (asset) return [asset];
+  const out: string[] = [];
+  for (const f of files) {
+    const k = kindOf(f.name);
+    if (!k) continue;
+    try {
+      out.push(await uploadFile(f, folderFor(k) ?? defaultFolder(k)));
+    } catch (err) {
+      setStatus(`Envoi impossible : ${(err as Error).message}`, true);
+    }
+  }
+  if (out.length) await refreshAssets();
+  return out;
+}
+
+const viewport = $('viewport');
+const dropOverlay = $('drop-overlay');
+const isFileDrag = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).some((x) => x === 'Files' || x === 'text/asset');
+const hideDrop = () => ((dropOverlay.hidden = true), dropOverlay.querySelectorAll('.over').forEach((z) => z.classList.remove('over')));
+
+window.addEventListener('dragenter', (e) => { if (isFileDrag(e)) dropOverlay.hidden = false; });
+window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) hideDrop(); });
+window.addEventListener('dragend', hideDrop);
+// évite que le navigateur ouvre le fichier quand on rate la cible
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => (e.preventDefault(), hideDrop()));
+
+dropOverlay.querySelectorAll<HTMLElement>('[data-zone]').forEach((zone) => {
+  zone.addEventListener('dragover', (e) => (e.preventDefault(), zone.classList.add('over')));
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    hideDrop();
+    void dropOnScene(e as DragEvent, zone.dataset.zone as 'bg' | 'el');
+  });
+});
+
+async function dropOnScene(e: DragEvent, zone: 'bg' | 'el') {
+  const [W, H] = project.project.resolution;
+  const r = viewport.getBoundingClientRect();
+  const px = ((e.clientX - r.left) / r.width) * W;
+  const py = ((e.clientY - r.top) / r.height) * H;
+  const s = project.timeline[selScene];
+  const paths = await resolveDrop(e, (k) => (zone === 'bg' && k === 'image' ? 'backgrounds' : undefined));
+  const added: any[] = [];
+  for (const p of paths) {
+    const k = kindOf(p);
+    if (k === 'image' && zone === 'bg') s.background = p;
+    else if (k === 'image' || k === 'video') {
+      const el = { type: k, file: p, position: [Math.round(px), Math.round(py)] as [number, number], size: undefined as any };
+      delete el.size;
+      (s.elements ??= []).push(el as any);
+      added.push(el);
+    } else if (k === 'audio') (s.audio ??= []).push({ file: p, start: 0, volume: 1 });
+  }
+  compiled = compile(project);
+  await media.preload(compiled);
+  for (const el of added) {
+    // taille initiale : tient à 60 % de l'écran, centré sur le point de dépôt
+    const [nw, nh] = naturalOf(el.file, el.type);
+    if (!nw) continue;
+    const k = Math.min((W * 0.6) / nw, (H * 0.6) / nh);
+    el.size = [Math.round(nw * k), Math.round(nh * k)];
+    el.position = [Math.round(px - el.size[0] / 2), Math.round(py - el.size[1] / 2)];
+  }
+  if (added.length) selRef = added[added.length - 1];
+  tab = 'scene';
+  await rebuild();
+}
+
+// dépôt sur un champ « Fichier » / « Fond » / « Police » de l'inspecteur
+const inspectorEl = $('inspector');
+const fieldAt = (e: Event) => (e.target as HTMLElement).closest?.('input[list]') as HTMLInputElement | null;
+inspectorEl.addEventListener('dragover', (e) => {
+  const el = fieldAt(e);
+  if (el) (e.preventDefault(), el.classList.add('dropping'));
+});
+inspectorEl.addEventListener('dragleave', (e) => fieldAt(e)?.classList.remove('dropping'));
+inspectorEl.addEventListener('drop', async (e) => {
+  const el = fieldAt(e);
+  if (!el) return;
+  e.preventDefault();
+  e.stopPropagation();
+  hideDrop();
+  el.classList.remove('dropping');
+  const [path] = await resolveDrop(e as DragEvent, () => el.dataset.folder);
+  if (!path) return;
+  el.value = el.getAttribute('list') === 'dl-font' ? path.split('/').pop()!.replace(/\.[^.]+$/, '') : path;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  await changed();
+  renderInspector();
+});
+
+// ---------- sélection, déplacement et redimensionnement à la souris ----------
+
+type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+interface Box { x: number; y: number; w: number; h: number }
+
+const overlay = $<HTMLCanvasElement>('overlay');
+const octx = overlay.getContext('2d')!;
+let selRef: any = null;
+let guides: { x?: number; y?: number } = {};
+let dragMoved = false; // un simple clic ne doit ni modifier ni enregistrer
+let drag: null | { mode: 'move' | 'resize'; handle?: Handle; sx: number; sy: number; box: Box; pos: [number, number]; ref: any; kind: Layer['kind'] } = null;
+
+function selectRef(ref: any, rerenderInspector: boolean) {
+  selRef = ref;
+  if (rerenderInspector) renderInspector();
+  else {
+    document.querySelectorAll('#inspector fieldset').forEach((f) => f.classList.toggle('selected', (f as any)._ref === ref));
+  }
+  drawOverlay();
+}
+
+function selectedLayer(): Layer | undefined {
+  return selRef ? sceneAt(compiled, t).layers.find((l) => l.ref === selRef) : undefined;
+}
+
+function layerBox(l: Layer): Box | null {
+  const [W] = project.project.resolution;
+  if (l.kind === 'text') {
+    octx.save();
+    const lay = layoutText(octx, project, l, W);
+    octx.restore();
+    if (!lay) return null;
+    const x = lay.anchor === 'left' ? l.pos[0] : lay.anchor === 'right' ? l.pos[0] - lay.width : l.pos[0] - lay.width / 2;
+    return { x, y: l.pos[1] - lay.height / 2, w: lay.width, h: lay.height };
+  }
+  const [nw, nh] = naturalOf(l.file, l.kind);
+  const [w, h] = l.size ?? [nw || 400, nh || 300];
+  return { x: l.pos[0], y: l.pos[1], w, h };
+}
+
+function handlePoints(b: Box): [Handle, number, number][] {
+  const { x, y, w, h } = b;
+  return [
+    ['nw', x, y], ['n', x + w / 2, y], ['ne', x + w, y], ['e', x + w, y + h / 2],
+    ['se', x + w, y + h], ['s', x + w / 2, y + h], ['sw', x, y + h], ['w', x, y + h / 2],
+  ];
+}
+
+/** Rapport pixels-projet / pixels-écran de l'aperçu. */
+const viewScale = () => project.project.resolution[0] / (overlay.clientWidth || project.project.resolution[0]);
+
+function drawOverlay() {
+  if (!project) return;
+  const [W, H] = project.project.resolution;
+  if (overlay.width !== W || overlay.height !== H) {
+    overlay.width = W;
+    overlay.height = H;
+  }
+  octx.clearRect(0, 0, W, H);
+  if (playing) return;
+  const k = viewScale();
+  const l = selectedLayer();
+  const b = l && layerBox(l);
+  octx.save();
+  if (l && b) {
+    octx.lineWidth = 2 * k;
+    octx.strokeStyle = '#f0a53c';
+    octx.strokeRect(b.x, b.y, b.w, b.h);
+    if (l.kind !== 'text') {
+      const s = 10 * k;
+      for (const [, px, py] of handlePoints(b)) {
+        octx.fillStyle = '#fff';
+        octx.fillRect(px - s / 2, py - s / 2, s, s);
+        octx.strokeRect(px - s / 2, py - s / 2, s, s);
+      }
+    }
+  }
+  octx.strokeStyle = '#00e0c0';
+  octx.lineWidth = 1.5 * k;
+  if (guides.x != null) (octx.beginPath(), octx.moveTo(guides.x, 0), octx.lineTo(guides.x, H), octx.stroke());
+  if (guides.y != null) (octx.beginPath(), octx.moveTo(0, guides.y), octx.lineTo(W, guides.y), octx.stroke());
+  octx.restore();
+}
+
+function fitViewport() {
+  if (!project) return;
+  const stage = document.querySelector<HTMLElement>('.stage')!;
+  const [W, H] = project.project.resolution;
+  const k = Math.min(stage.clientWidth / W, stage.clientHeight / H);
+  viewport.style.width = `${Math.floor(W * k)}px`;
+  viewport.style.height = `${Math.floor(H * k)}px`;
+  drawOverlay();
+}
+new ResizeObserver(fitViewport).observe(document.querySelector('.stage')!);
+
+const toProject = (e: PointerEvent): [number, number] => {
+  const r = overlay.getBoundingClientRect();
+  const [W, H] = project.project.resolution;
+  return [((e.clientX - r.left) / r.width) * W, ((e.clientY - r.top) / r.height) * H];
+};
+
+function handleAt(b: Box, x: number, y: number): Handle | null {
+  const r = 9 * viewScale();
+  for (const [name, px, py] of handlePoints(b)) if (Math.abs(x - px) <= r && Math.abs(y - py) <= r) return name;
+  return null;
+}
+
+const inBox = (b: Box, x: number, y: number) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+
+function pick(x: number, y: number): Layer | null {
+  const s = sceneAt(compiled, t);
+  const lt = t - s.start;
+  for (const l of [...s.layers].reverse()) {
+    if (lt < l.t0 || lt >= l.t1) continue;
+    const b = layerBox(l);
+    if (b && inBox(b, x, y)) return l;
+  }
+  return null;
+}
+
+const CURSORS: Record<Handle, string> = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
+
+/** Aimante les bords et le centre du cadre sur ceux de l'écran (désactivable avec Alt). */
+function snap(v: number, size: number, max: number, thr: number): { v: number; guide?: number } {
+  let best: { d: number; shift: number; guide: number } | null = null;
+  for (const off of [0, size / 2, size]) {
+    for (const target of [0, max / 2, max]) {
+      const d = Math.abs(v + off - target);
+      if (d <= thr && (!best || d < best.d)) best = { d, shift: target - (v + off), guide: target };
+    }
+  }
+  return best ? { v: v + best.shift, guide: best.guide } : { v };
+}
+
+overlay.addEventListener('pointerdown', (e) => {
+  if (playing) return;
+  const [x, y] = toProject(e);
+  const cur = selectedLayer();
+  const curBox = cur && layerBox(cur);
+  let l: Layer | null = null;
+  let handle: Handle | null = null;
+  if (cur && curBox) {
+    if (cur.kind !== 'text') handle = handleAt(curBox, x, y);
+    if (handle || inBox(curBox, x, y)) l = cur;
+  }
+  l ??= pick(x, y);
+  if (!l) {
+    selectRef(null, false);
+    return;
+  }
+  if (l.ref !== selRef) {
+    tab = 'scene';
+    selRef = l.ref;
+    renderInspector();
+    document.querySelector('#inspector fieldset.selected')?.scrollIntoView({ block: 'nearest' });
+  }
+  const box = layerBox(l)!;
+  if (handle && l.kind !== 'text' && !l.ref.size) l.ref.size = [Math.round(box.w), Math.round(box.h)];
+  drag = { mode: handle ? 'resize' : 'move', handle: handle ?? undefined, sx: x, sy: y, box, pos: [...l.pos] as [number, number], ref: l.ref, kind: l.kind };
+  dragMoved = false;
+  overlay.setPointerCapture(e.pointerId);
+  drawOverlay();
+});
+
+overlay.addEventListener('pointermove', (e) => {
+  const [x, y] = toProject(e);
+  if (!drag) {
+    const l = selectedLayer();
+    const b = l && layerBox(l);
+    const hd = l && b && l.kind !== 'text' ? handleAt(b, x, y) : null;
+    overlay.style.cursor = hd ? CURSORS[hd] : b && inBox(b, x, y) ? 'move' : pick(x, y) ? 'pointer' : 'default';
+    return;
+  }
+  const [W, H] = project.project.resolution;
+  const thr = e.altKey ? 0 : 8 * viewScale();
+  const { box, ref } = drag;
+  if (!dragMoved && Math.hypot(x - drag.sx, y - drag.sy) < 3 * viewScale()) return;
+  dragMoved = true;
+  guides = {};
+
+  if (drag.mode === 'move') {
+    const sx = snap(box.x + (x - drag.sx), box.w, W, thr);
+    const sy = snap(box.y + (y - drag.sy), box.h, H, thr);
+    guides = { x: sx.guide, y: sy.guide };
+    const dx = sx.v - box.x;
+    const dy = sy.v - box.y;
+    // texte : `position` = point d'ancrage ; image / vidéo : coin supérieur gauche
+    ref.position = [Math.round(drag.pos[0] + dx), Math.round(drag.pos[1] + dy)];
+  } else {
+    const hd = drag.handle!;
+    let x1 = box.x, x2 = box.x + box.w, y1 = box.y, y2 = box.y + box.h;
+    if (hd.includes('e')) x2 = Math.max(x, x1 + 10);
+    if (hd.includes('w')) x1 = Math.min(x, x2 - 10);
+    if (hd.includes('s')) y2 = Math.max(y, y1 + 10);
+    if (hd.includes('n')) y1 = Math.min(y, y2 - 10);
+    if (hd.length === 2 && !e.shiftKey) {
+      // coin : proportions conservées (Maj = déformer librement)
+      const s = Math.max((x2 - x1) / box.w, (y2 - y1) / box.h);
+      const w = box.w * s;
+      const h = box.h * s;
+      if (hd.includes('e')) x2 = x1 + w; else x1 = x2 - w;
+      if (hd.includes('s')) y2 = y1 + h; else y1 = y2 - h;
+    }
+    ref.position = [Math.round(x1), Math.round(y1)];
+    ref.size = [Math.round(x2 - x1), Math.round(y2 - y1)];
+  }
+  compiled = compile(project);
+  void draw(false);
+});
+
+const endDrag = () => {
+  if (!drag) return;
+  drag = null;
+  guides = {};
+  if (!dragMoved) return drawOverlay();
+  void changed().then(() => {
+    if (tab === 'scene') renderInspector();
+  });
+};
+overlay.addEventListener('pointerup', endDrag);
+overlay.addEventListener('pointercancel', endDrag);
+
+// ---------- projets ----------
+
+async function switchProject(url: string, body: object) {
+  // sauvegarde immédiate des modifications en attente avant de changer de projet
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(project) });
+  }
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) location.reload();
+  else alert((await r.json()).error);
+}
+
+async function initProjects() {
+  const { current, projects } = await (await fetch('/api/projects')).json();
+  const sel = $<HTMLSelectElement>('project-select');
+  sel.replaceChildren(...projects.map((p: string) => h('option', { value: p }, p)));
+  sel.value = current;
+  sel.onchange = () => switchProject('/api/projects/open', { name: sel.value });
+  $('new-project').onclick = () => {
+    const name = prompt('Nom du nouveau projet (ex. ep2)')?.trim();
+    if (name) void switchProject('/api/projects/create', { name });
+  };
+}
+
 // ---------- démarrage ----------
 
 (async () => {
+  await initProjects();
   project = await (await fetch('/api/project')).json();
   compiled = compile(project);
   await refreshAssets();

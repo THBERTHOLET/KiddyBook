@@ -18,7 +18,7 @@ export interface Job {
   startedAt: number;
 }
 
-function findBin(name: 'ffmpeg' | 'ffprobe'): string {
+export function findBin(name: 'ffmpeg' | 'ffprobe'): string {
   const env = process.env[name.toUpperCase() + '_PATH'];
   if (env) return env;
   const link = join(process.env.LOCALAPPDATA ?? '', 'Microsoft', 'WinGet', 'Links', `${name}.exe`);

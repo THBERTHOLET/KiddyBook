@@ -21,11 +21,13 @@ export function row(label: string, ...ctl: HTMLElement[]) {
   return h('div', { class: 'row' }, h('label', {}, label), h('div', { class: 'ctl' }, ...ctl));
 }
 
-export function textField(o: Obj, k: string, notify: Notify, opt: { list?: string; optional?: boolean } = {}) {
+/** `folder` : dossier d'assets où atterrissent les fichiers déposés sur ce champ. */
+export function textField(o: Obj, k: string, notify: Notify, opt: { list?: string; optional?: boolean; folder?: string } = {}) {
   return h('input', {
     type: 'text',
     value: o[k] ?? '',
     list: opt.list,
+    'data-folder': opt.folder,
     oninput: (e: Event) => {
       const v = (e.target as HTMLInputElement).value;
       if (opt.optional && v === '') delete o[k];

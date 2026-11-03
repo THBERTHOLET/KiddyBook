@@ -1,6 +1,8 @@
 import type { Project, Scene } from './schema';
 
 interface LayerBase {
+  /** Objet du projet dont la couche est issue (permet à l'éditeur de le modifier). */
+  ref: any;
   /** temps de scène (s) */
   t0: number;
   t1: number;
@@ -58,7 +60,7 @@ function timed(
 ): LayerBase {
   const t0 = Math.min(e.start ?? 0, sceneDuration);
   const t1 = Math.min(e.duration != null ? t0 + e.duration : sceneDuration, sceneDuration);
-  return { t0, t1, fadeIn: e.fade_in ?? 0, fadeOut: e.fade_out ?? 0 };
+  return { ref: e, t0, t1, fadeIn: e.fade_in ?? 0, fadeOut: e.fade_out ?? 0 };
 }
 
 export function compile(project: Project): Compiled {

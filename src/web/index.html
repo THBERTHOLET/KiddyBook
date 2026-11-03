@@ -9,13 +9,24 @@
   <body>
     <header>
       <strong>KiddyBooks</strong>
+      <select id="project-select" title="Projet ouvert"></select>
+      <button id="new-project">+ Nouveau projet</button>
       <span id="status"></span>
       <span class="spacer"></span>
       <button id="export-btn" class="primary">Exporter en MP4</button>
     </header>
     <aside id="scenes"></aside>
     <main>
-      <div class="stage"><canvas id="canvas"></canvas></div>
+      <div class="stage">
+        <div id="viewport">
+          <canvas id="canvas"></canvas>
+          <canvas id="overlay"></canvas>
+          <div id="drop-overlay" hidden>
+            <div data-zone="bg">Fond de la scène<small>image</small></div>
+            <div data-zone="el">Ajouter à la scène<small>image, vidéo, audio</small></div>
+          </div>
+        </div>
+      </div>
       <div class="transport">
         <button id="play">▶</button>
         <span id="time">0:00.0 / 0:00.0</span>

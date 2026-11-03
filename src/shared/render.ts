@@ -49,6 +49,32 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number): string
   return out;
 }
 
+export interface TextLayout {
+  lines: string[];
+  lh: number;
+  width: number;
+  height: number;
+  anchor: 'left' | 'center' | 'right';
+}
+
+/** Règle la police sur `ctx` et calcule la mise en page d'un texte. Partagé par le rendu et l'éditeur. */
+export function layoutText(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  l: Extract<Layer, { kind: 'text' }>,
+  W: number,
+): TextLayout | null {
+  const st = project.styles[l.style];
+  if (!st) return null;
+  ctx.font = `${st.size}px "${st.font}", serif`;
+  ctx.textAlign = st.anchor ?? 'center';
+  ctx.textBaseline = 'middle';
+  const lh = st.size * (st.line_height ?? 1.3);
+  const lines = wrap(ctx, l.content, st.max_width ?? W - 240);
+  const width = Math.max(...lines.map((s) => ctx.measureText(s).width), 1);
+  return { lines, lh, width, height: lines.length * lh, anchor: st.anchor ?? 'center' };
+}
+
 function drawLayer(
   ctx: CanvasRenderingContext2D,
   project: Project,
@@ -61,19 +87,15 @@ function drawLayer(
   ctx.globalAlpha = alpha;
   if (l.kind === 'text') {
     const st = project.styles[l.style];
-    if (st) {
-      ctx.font = `${st.size}px "${st.font}", serif`;
+    const lay = layoutText(ctx, project, l, W);
+    if (st && lay) {
       ctx.fillStyle = st.color;
-      ctx.textAlign = st.anchor ?? 'center';
-      ctx.textBaseline = 'middle';
       if (st.shadow) {
         ctx.shadowColor = st.shadow.color;
         ctx.shadowBlur = st.shadow.blur;
       }
-      const lh = st.size * (st.line_height ?? 1.3);
-      const lines = wrap(ctx, l.content, st.max_width ?? W - 240);
-      const y0 = l.pos[1] - ((lines.length - 1) * lh) / 2;
-      lines.forEach((line, i) => ctx.fillText(line, l.pos[0], y0 + i * lh));
+      const y0 = l.pos[1] - ((lay.lines.length - 1) * lay.lh) / 2;
+      lay.lines.forEach((line, i) => ctx.fillText(line, l.pos[0], y0 + i * lay.lh));
     }
   } else {
     const src = l.kind === 'image' ? media.images.get(l.file) : media.videos.get(l.file);
