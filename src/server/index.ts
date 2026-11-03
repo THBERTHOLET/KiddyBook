@@ -1,5 +1,5 @@
 import express from 'express';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectSchema, type Project } from '../shared/schema';
@@ -49,6 +49,33 @@ const DEFAULT_PROJECT = {
 
 const projectName = () => relative(projectsRoot, projectDir) || projectDir;
 
+/**
+ * Garde-fou : toute écriture (projet, upload, export) doit venir d'un onglet qui affiche le projet
+ * actuellement ouvert. Sinon un onglet resté sur un autre projet écraserait celui-ci avec ses données.
+ */
+const requireProject: express.RequestHandler = (req, res, next) => {
+  const claimed = req.header('x-project');
+  if (claimed === projectName()) return next();
+  res.status(409).json({
+    error: `Cet onglet affiche « ${claimed ?? '?'} » mais le projet ouvert est « ${projectName()} ». Rechargez la page.`,
+    current: projectName(),
+  });
+};
+
+/** Copie datée de project.json avant écrasement : filet de sécurité (au plus une par 30 s, 200 conservées). */
+function backupProject() {
+  const file = projectFile();
+  if (!existsSync(file)) return;
+  const dir = join(projectDir, '.history');
+  mkdirSync(dir, { recursive: true });
+  const files = readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
+  const last = files[files.length - 1];
+  if (last && Date.now() - statSync(join(dir, last)).mtimeMs < 30_000) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  copyFileSync(file, join(dir, `project-${stamp}.json`));
+  for (const old of files.slice(0, Math.max(0, files.length + 1 - 200))) rmSync(join(dir, old), { force: true });
+}
+
 app.get('/api/projects', (_req, res) => {
   const names = existsSync(projectsRoot)
     ? readdirSync(projectsRoot).filter((n) => existsSync(join(projectsRoot, n, 'project.json')))
@@ -97,15 +124,17 @@ app.post('/api/projects/create', express.json(), (req, res) => {
 });
 
 app.get('/api/project', (_req, res) => {
+  res.set('X-Project', projectName());
   res.json(readProject());
 });
 
-app.put('/api/project', express.json({ limit: '5mb' }), (req, res) => {
+app.put('/api/project', requireProject, express.json({ limit: '5mb' }), (req, res) => {
   const parsed = ProjectSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(422).json({ errors: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     return;
   }
+  backupProject();
   writeFileSync(projectFile(), JSON.stringify(req.body, null, 2) + '\n');
   res.json({ ok: true });
 });
@@ -124,7 +153,7 @@ app.get('/api/assets', (_req, res) => {
   res.json(walk(join(projectDir, 'assets')).sort());
 });
 
-app.post('/api/upload', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+app.post('/api/upload', requireProject, express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
   try {
     const rel = String(req.query.path ?? '');
     if (!rel.startsWith('assets/')) throw new Error('Les fichiers doivent aller dans assets/');
@@ -157,7 +186,7 @@ app.use('/exports', (req, res, next) => express.static(join(projectDir, 'exports
 // --- export ---
 let current: { job: Job; cancel: () => void } | null = null;
 
-app.post('/api/export', express.json(), (req, res) => {
+app.post('/api/export', requireProject, express.json(), (req, res) => {
   if (current?.job.status === 'running') {
     res.status(409).json({ error: 'Un export est déjà en cours' });
     return;

@@ -1,5 +1,5 @@
-import { spawn, execFile } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { chromium, type Browser } from 'playwright-core';
@@ -96,9 +96,19 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
   let cancelled = false;
   let browser: Browser | undefined;
   let ff: ReturnType<typeof spawn> | undefined;
+  let mixChild: ChildProcess | undefined;
+  let ffClosed = false;
+  /**
+   * Annulation immédiate : l'état passe tout de suite à « cancelled » (un nouvel export redevient possible),
+   * et tout ce qui tourne est arrêté. La boucle de rendu ne doit surtout pas pouvoir rester bloquée.
+   */
   const cancel = () => {
+    if (job.status !== 'running') return;
     cancelled = true;
+    job.status = 'cancelled';
+    mixChild?.kill();
     ff?.kill();
+    void browser?.close().catch(() => {});
   };
 
   (async () => {
@@ -111,14 +121,18 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
     const mixFile = join(exportsDir, '.mix.wav');
     if (mix) {
       try {
-        await run(findBin('ffmpeg'), [
+        const p = run(findBin('ffmpeg'), [
           '-y', '-hide_banner', '-loglevel', 'error', ...mix.inputs,
           '-filter_complex', mix.filter, '-map', '[aout]', '-c:a', 'pcm_s16le', mixFile,
         ], { maxBuffer: 10 * 1024 * 1024 });
+        mixChild = p.child;
+        await p;
       } catch (e: any) {
+        if (cancelled) return;
         throw new Error(`Mixage audio échoué : ${String(e.stderr ?? e.message).slice(-800)}`);
       }
     }
+    if (cancelled) return;
     const audio = mix ? { inputs: ['-i', mixFile] } : null;
 
     for (const channel of ['msedge', 'chrome']) {
@@ -130,6 +144,7 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
       }
     }
     if (!browser) throw new Error('Ni Microsoft Edge ni Google Chrome ne sont utilisables.');
+    if (cancelled) return;
 
     const page = await browser.newPage();
     page.on('pageerror', (e) => job.warnings.push(`Page d'export : ${e.message}`));
@@ -152,22 +167,28 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
     ff = spawn(findBin('ffmpeg'), args, { stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     ff.stderr!.on('data', (d) => (stderr += d));
-    const exited = new Promise<number>((res) => ff!.on('close', (code) => res(code ?? -1)));
+    const exited = new Promise<number>((res) =>
+      ff!.on('close', (code) => {
+        ffClosed = true;
+        res(code ?? -1);
+      }),
+    );
     ff.stdin!.on('error', () => {});
 
-    for (let i = 0; i < frames && !cancelled; i++) {
+    for (let i = 0; i < frames && !cancelled && !ffClosed; i++) {
       const dataUrl = (await page.evaluate(
         ([idx, q]) => (window as any).__frame(idx, q),
         [i, opts.jpegQuality] as const,
       )) as string;
       const buf = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
-      if (!ff.stdin!.write(buf)) await new Promise((r) => ff!.stdin!.once('drain', r));
+      // attente du vidage du tampon, mais jamais au-delà de la fin d'ffmpeg (sinon blocage à l'annulation)
+      if (!ff.stdin!.write(buf)) await Promise.race([new Promise((r) => ff!.stdin!.once('drain', r)), exited]);
       job.frame = i + 1;
     }
-    ff.stdin!.end();
+    if (!ffClosed) ff.stdin!.end();
     const code = await exited;
     if (cancelled) {
-      job.status = 'cancelled';
+      return;
     } else if (code !== 0) {
       throw new Error(`ffmpeg a échoué (code ${code}) : ${stderr.slice(-800)}`);
     } else {
@@ -176,10 +197,17 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
     }
   })()
     .catch((e) => {
+      if (cancelled) return; // erreurs attendues : navigateur fermé, ffmpeg tué…
       job.status = 'error';
       job.error = e instanceof Error ? e.message : String(e);
     })
-    .finally(() => browser?.close().catch(() => {}));
+    .finally(() => {
+      void browser?.close().catch(() => {});
+      const exportsDir = join(projectDir, 'exports');
+      rmSync(join(exportsDir, '.mix.wav'), { force: true });
+      // une annulation ou un échec laisse un MP4 incomplet : on ne le garde pas
+      if (ff && job.status !== 'done') rmSync(join(exportsDir, project.project.output_file), { force: true });
+    });
 
   return { job, cancel };
 }

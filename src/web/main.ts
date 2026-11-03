@@ -45,6 +45,19 @@ function serialize(): string {
   return JSON.stringify(clone);
 }
 
+/**
+ * Projet que cet onglet affiche (renvoyé avec les données au chargement). Il accompagne chaque écriture :
+ * le serveur refuse si un autre projet est entre-temps devenu le projet ouvert.
+ */
+let currentProject = '';
+const writeHeaders = (extra: Record<string, string> = {}) => ({ 'X-Project': currentProject, ...extra });
+
+/** Onglet désynchronisé : on arrête d'écrire et on le dit clairement. */
+function desynced(message: string) {
+  clearTimeout(saveTimer);
+  setStatus(`⚠ ${message}`, true);
+}
+
 let saveTimer: number | undefined;
 function scheduleSave() {
   setStatus('Modifié…');
@@ -52,10 +65,11 @@ function scheduleSave() {
   saveTimer = window.setTimeout(async () => {
     const r = await fetch('/api/project', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders({ 'Content-Type': 'application/json' }),
       body: serialize(),
     });
     if (r.ok) setStatus('Enregistré');
+    else if (r.status === 409) desynced((await r.json()).error);
     else {
       const { errors } = await r.json();
       setStatus(`Non enregistré : ${errors[0].path} — ${errors[0].message}`, true);
@@ -776,10 +790,14 @@ $('export-btn').onclick = () => {
     );
 
   const start = async () => {
-    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: serialize() });
+    const saved = await fetch('/api/project', { method: 'PUT', headers: writeHeaders({ 'Content-Type': 'application/json' }), body: serialize() });
+    if (saved.status === 409) {
+      body.replaceChildren(h('div', { class: 'errtext' }, (await saved.json()).error), h('button', { onclick: () => location.reload() }, 'Recharger la page'));
+      return;
+    }
     const r = await fetch('/api/export', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ origin: location.origin, crf: Number(crf.value) }),
     });
     if (!r.ok) {
@@ -823,7 +841,7 @@ const defaultFolder = (k: Kind) => ({ image: 'illustrations', video: 'illustrati
 
 async function uploadFile(file: File, folder: string): Promise<string> {
   const path = `assets/${folder}/${file.name}`;
-  const r = await fetch(`/api/upload?path=${encodeURIComponent(path)}`, { method: 'POST', body: file });
+  const r = await fetch(`/api/upload?path=${encodeURIComponent(path)}`, { method: 'POST', headers: writeHeaders(), body: file });
   if (!r.ok) throw new Error((await r.json()).error);
   media.invalidate(path);
   audio.invalidate(path);
@@ -1159,7 +1177,7 @@ async function switchProject(url: string, body: object) {
   // sauvegarde immédiate des modifications en attente avant de changer de projet
   if (saveTimer) {
     clearTimeout(saveTimer);
-    await fetch('/api/project', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: serialize() });
+    await fetch('/api/project', { method: 'PUT', headers: writeHeaders({ 'Content-Type': 'application/json' }), body: serialize() });
   }
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (r.ok) location.reload();
@@ -1182,7 +1200,9 @@ async function initProjects() {
 
 (async () => {
   await initProjects();
-  project = await (await fetch('/api/project')).json();
+  const res = await fetch('/api/project');
+  currentProject = res.headers.get('X-Project') ?? ''; // le nom arrive avec les données : même instant, même projet
+  project = await res.json();
   // ancien format : `illustration` devient le premier élément (le plus au fond), pour pouvoir le réordonner
   for (const sc of project.timeline) {
     if (!sc.illustration) continue;

@@ -7,3 +7,4 @@ dev.log
 dev.err
 .last-project
 .proxies/
+.history/
