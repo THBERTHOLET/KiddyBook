@@ -25,17 +25,39 @@ export const StyleSchema = z.object({
   font: z.string(),
   size: z.number().positive(),
   color: z.string(),
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
   anchor: z.enum(['left', 'center', 'right']).optional(),
   line_height: z.number().positive().optional(),
   max_width: z.number().positive().optional(),
   shadow: z.object({ color: z.string(), blur: z.number().min(0) }).optional(),
 });
 
+/** Champs d'un texte qui prennent le pas sur son style. */
+export const TEXT_OVERRIDES = ['font', 'size', 'color', 'bold', 'italic', 'anchor', 'line_height'] as const;
+
+/** Style effectif d'un texte : le style nommé, surchargé par les champs propres au texte. */
+export function resolveStyle(st: z.infer<typeof StyleSchema>, text: Partial<Record<(typeof TEXT_OVERRIDES)[number], unknown>>) {
+  const out: Record<string, unknown> = { ...st };
+  for (const k of TEXT_OVERRIDES) if (text?.[k] !== undefined) out[k] = text[k];
+  return out as z.infer<typeof StyleSchema>;
+}
+
 export const TextSchema = z.object({
   type: z.literal('text').optional(),
   style: z.string(),
   content: z.string(),
   position: Vec2,
+  /** Surcharges du style, propres à ce texte. */
+  font: z.string().optional(),
+  size: z.number().positive().optional(),
+  color: z.string().optional(),
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
+  anchor: z.enum(['left', 'center', 'right']).optional(),
+  line_height: z.number().positive().optional(),
+  /** Largeur de la zone de texte (px) : le texte revient à la ligne dedans. Défaut : `max_width` du style. */
+  width: z.number().positive().optional(),
   /**
    * `id` d'un passage audio de la même scène : le texte apparaît quand ce passage démarre (`start` = décalage)
    * et disparaît quand il se termine, sauf `duration` explicite.

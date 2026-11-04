@@ -1,7 +1,7 @@
 import { compile, sceneAt, type Compiled, type Durations, type Layer } from '../shared/compile';
 import { Media } from '../shared/media';
 import { layoutText, renderFrame } from '../shared/render';
-import { ProjectSchema, type Project, type Scene } from '../shared/schema';
+import { ProjectSchema, resolveStyle, TEXT_OVERRIDES, type Project, type Scene } from '../shared/schema';
 import { AudioPlayer } from './audio';
 import { areaField, checkField, fmtTime, h, numField, row, selectField, textField, vecField } from './ui';
 
@@ -270,8 +270,22 @@ function renderSceneList() {
       h('button', { onclick: () => addScene('page') }, '+ Page'),
       h('button', { onclick: () => addScene('cover') }, '+ Couv.'),
       h('button', { onclick: () => addScene('end') }, '+ Fin'),
+      h('button', { title: 'Dupliquer la scène sélectionnée (juste après elle)', onclick: duplicateScene }, '⧉ Dupliquer'),
     ),
   );
+}
+
+/** Copie la scène sélectionnée juste après elle, avec tous ses éléments, textes et audios. */
+function duplicateScene() {
+  const copy: Scene = structuredClone(project.timeline[selScene]);
+  if (copy.type === 'page') {
+    const nums = project.timeline.map((s) => s.page_index ?? 0);
+    copy.page_index = Math.max(0, ...nums) + 1;
+  }
+  project.timeline.splice(selScene + 1, 0, copy);
+  selScene += 1;
+  tab = 'scene';
+  void rebuild().then(() => seek(compiled.scenes[selScene].start));
 }
 
 function addScene(type: Scene['type']) {
@@ -570,6 +584,46 @@ function sizeHelpers(o: any, kind: 'image' | 'video'): HTMLElement[] {
   ];
 }
 
+/** Liste « oui / non / comme le style » pour un booléen surchargeable. */
+function triState(o: any, k: 'bold' | 'italic', inherited: boolean) {
+  const sel = h('select', {
+    onchange: (e: Event) => {
+      const v = (e.target as HTMLSelectElement).value;
+      if (v === '') delete o[k];
+      else o[k] = v === '1';
+      void rebuild();
+    },
+  },
+    h('option', { value: '' }, `comme le style (${inherited ? 'oui' : 'non'})`),
+    h('option', { value: '1' }, 'oui'),
+    h('option', { value: '0' }, 'non'),
+  ) as HTMLSelectElement;
+  sel.value = o[k] == null ? '' : o[k] ? '1' : '0';
+  return sel;
+}
+
+/** Surcharges du style pour un texte : taille, couleur, gras… Les champs vides héritent du style. */
+function textOverrideRows(o: any): HTMLElement[] {
+  const st = project.styles[o.style];
+  if (!st) return [];
+  const eff = resolveStyle(st, {});
+  const ph = (el: HTMLElement, v: unknown) => Object.assign(el, { placeholder: String(v ?? '') });
+  const colorHex = /^#[0-9a-f]{6}$/i.test(o.color ?? eff.color) ? (o.color ?? eff.color) : '#ffffff';
+  const used = TEXT_OVERRIDES.some((k) => o[k] !== undefined);
+  return [
+    row('Police', ph(textField(o, 'font', changed, { list: 'dl-font', optional: true, folder: 'fonts' }), eff.font)),
+    row('Taille', ph(numField(o, 'size', changed, { step: 1, min: 1, optional: true }), eff.size)),
+    row('Couleur',
+      h('input', { type: 'color', value: colorHex, oninput: (e: Event) => { o.color = (e.target as HTMLInputElement).value; changed(); } }),
+      ph(textField(o, 'color', changed, { optional: true }), eff.color)),
+    row('Gras', triState(o, 'bold', !!eff.bold)),
+    row('Italique', triState(o, 'italic', !!eff.italic)),
+    row('Ancrage', ph(selectField(o, 'anchor', ['left', 'center', 'right'], changed, { optional: true }), eff.anchor ?? 'center')),
+    row('Interligne', ph(numField(o, 'line_height', changed, { step: 0.05, optional: true }), eff.line_height ?? 1.3)),
+    used ? h('button', { class: 'small', title: 'Revenir au style', onclick: () => { for (const k of TEXT_OVERRIDES) delete o[k]; void rebuild(); } }, '↺ Retirer les surcharges') : h('div', { class: 'hint' }, 'Champs vides = valeurs du style.'),
+  ];
+}
+
 function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDelete?: () => void, onMove?: (d: number) => void) {
   const extra = [
     ...(onMove ? [h('button', { class: 'small', title: 'Monter dans la liste (plus au fond)', onclick: () => onMove(-1) }, '↑'), h('button', { class: 'small', title: 'Descendre dans la liste (plus devant)', onclick: () => onMove(1) }, '↓')] : []),
@@ -577,9 +631,11 @@ function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string,
   ];
   if (kind === 'text') {
     return fieldset({ key: o, title, rename: true }, extra,
-      row('Style', selectField(o, 'style', Object.keys(project.styles), changed)),
+      row('Style', selectField(o, 'style', Object.keys(project.styles), rebuild)),
       areaField(o, 'content', changed),
       row('Position', ...vecField(o, 'position', changed)),
+      row('Largeur', numField(o, 'width', changed, { step: 10, min: 10, optional: true }), h('span', { class: 'hint' }, 'vide = auto · retour à la ligne')),
+      ...textOverrideRows(o),
       ...syncRows(o),
       ...timingRows(o),
     );
@@ -654,7 +710,7 @@ function scenePane(): HTMLElement[] {
     fieldset({ key: s, title: `Scène ${selScene + 1}` }, [
       h('button', { class: 'small', onclick: () => moveItem(tl, selScene, -1) && (selScene--, rebuild()) }, '↑'),
       h('button', { class: 'small', onclick: () => moveItem(tl, selScene, 1) && (selScene++, rebuild()) }, '↓'),
-      h('button', { class: 'small', title: 'Dupliquer', onclick: () => (tl.splice(selScene + 1, 0, structuredClone(s)), selScene++, rebuild()) }, '⧉'),
+      h('button', { class: 'small', title: 'Dupliquer', onclick: duplicateScene }, '⧉'),
       tl.length > 1 ? delBtn(() => (tl.splice(selScene, 1), (selScene = Math.max(0, selScene - 1)), rebuild())) : null,
     ],
       row('Type', selectField(s, 'type', ['cover', 'page', 'end'], rebuild)),
@@ -732,6 +788,7 @@ function stylesPane(): HTMLElement[] {
       row('Police', textField(st, 'font', changed, { list: 'dl-font', folder: 'fonts' })),
       row('Taille', numField(st, 'size', changed, { step: 1, min: 1 })),
       row('Couleur', h('input', { type: 'color', value: st.color, oninput: (e: Event) => ((st.color = (e.target as HTMLInputElement).value), changed()) }), textField(st, 'color', changed)),
+      row('Gras', checkField(st, 'bold', changed), h('span', { class: 'hint' }, 'Italique'), checkField(st, 'italic', changed)),
       row('Ancrage', selectField(st, 'anchor', ['left', 'center', 'right'], changed, { optional: true })),
       row('Interligne', numField(st, 'line_height', changed, { step: 0.05, optional: true })),
       row('Largeur max', numField(st, 'max_width', changed, { step: 10, optional: true })),
@@ -1031,6 +1088,11 @@ function selectRef(ref: any, rerenderInspector: boolean) {
   drawOverlay();
 }
 
+function textAnchor(ref: any): 'left' | 'center' | 'right' {
+  const st = project.styles[ref.style];
+  return (st ? resolveStyle(st, ref).anchor : undefined) ?? 'center';
+}
+
 function selectedLayer(): Layer | undefined {
   return selRef ? sceneAt(compiled, t).layers.find((l) => l.ref === selRef) : undefined;
 }
@@ -1050,8 +1112,10 @@ function layerBox(l: Layer): Box | null {
   return { x: l.pos[0], y: l.pos[1], w, h };
 }
 
-function handlePoints(b: Box): [Handle, number, number][] {
+function handlePoints(b: Box, textOnly = false): [Handle, number, number][] {
   const { x, y, w, h } = b;
+  // un texte ne se redimensionne qu'en largeur (la hauteur suit le retour à la ligne)
+  if (textOnly) return [['e', x + w, y + h / 2], ['w', x, y + h / 2]];
   return [
     ['nw', x, y], ['n', x + w / 2, y], ['ne', x + w, y], ['e', x + w, y + h / 2],
     ['se', x + w, y + h], ['s', x + w / 2, y + h], ['sw', x, y + h], ['w', x, y + h / 2],
@@ -1078,9 +1142,9 @@ function drawOverlay() {
     octx.lineWidth = 2 * k;
     octx.strokeStyle = '#f0a53c';
     octx.strokeRect(b.x, b.y, b.w, b.h);
-    if (l.kind !== 'text') {
+    {
       const s = 10 * k;
-      for (const [, px, py] of handlePoints(b)) {
+      for (const [, px, py] of handlePoints(b, l.kind === 'text')) {
         octx.fillStyle = '#fff';
         octx.fillRect(px - s / 2, py - s / 2, s, s);
         octx.strokeRect(px - s / 2, py - s / 2, s, s);
@@ -1112,9 +1176,9 @@ const toProject = (e: PointerEvent): [number, number] => {
   return [((e.clientX - r.left) / r.width) * W, ((e.clientY - r.top) / r.height) * H];
 };
 
-function handleAt(b: Box, x: number, y: number): Handle | null {
+function handleAt(b: Box, x: number, y: number, textOnly = false): Handle | null {
   const r = 9 * viewScale();
-  for (const [name, px, py] of handlePoints(b)) if (Math.abs(x - px) <= r && Math.abs(y - py) <= r) return name;
+  for (const [name, px, py] of handlePoints(b, textOnly)) if (Math.abs(x - px) <= r && Math.abs(y - py) <= r) return name;
   return null;
 }
 
@@ -1153,7 +1217,7 @@ overlay.addEventListener('pointerdown', (e) => {
   let l: Layer | null = null;
   let handle: Handle | null = null;
   if (cur && curBox) {
-    if (cur.kind !== 'text') handle = handleAt(curBox, x, y);
+    handle = handleAt(curBox, x, y, cur.kind === 'text');
     if (handle || inBox(curBox, x, y)) l = cur;
   }
   l ??= pick(x, y);
@@ -1181,7 +1245,7 @@ overlay.addEventListener('pointermove', (e) => {
   if (!drag) {
     const l = selectedLayer();
     const b = l && layerBox(l);
-    const hd = l && b && l.kind !== 'text' ? handleAt(b, x, y) : null;
+    const hd = l && b ? handleAt(b, x, y, l.kind === 'text') : null;
     overlay.style.cursor = hd ? CURSORS[hd] : b && inBox(b, x, y) ? 'move' : pick(x, y) ? 'pointer' : 'default';
     return;
   }
@@ -1202,6 +1266,18 @@ overlay.addEventListener('pointermove', (e) => {
     ref.position = [Math.round(drag.pos[0] + dx), Math.round(drag.pos[1] + dy)];
   } else {
     const hd = drag.handle!;
+    if (drag.kind === 'text') {
+      // largeur de la zone ; `position` reste le point d'ancrage (bord gauche, centre ou bord droit)
+      let x1 = box.x, x2 = box.x + box.w;
+      if (hd === 'e') x2 = Math.max(x, x1 + 40);
+      else x1 = Math.min(x, x2 - 40);
+      ref.width = Math.round(x2 - x1);
+      const anchor = textAnchor(ref);
+      ref.position = [Math.round(anchor === 'left' ? x1 : anchor === 'right' ? x2 : (x1 + x2) / 2), ref.position[1]];
+      compiled = compileNow();
+      void draw(false);
+      return;
+    }
     let x1 = box.x, x2 = box.x + box.w, y1 = box.y, y2 = box.y + box.h;
     if (hd.includes('e')) x2 = Math.max(x, x1 + 10);
     if (hd.includes('w')) x1 = Math.min(x, x2 - 10);

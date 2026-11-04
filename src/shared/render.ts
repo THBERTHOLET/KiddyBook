@@ -1,5 +1,5 @@
 import { sceneAt, type Compiled, type Layer } from './compile';
-import { fontFamily, type Effects, type Project } from './schema';
+import { fontFamily, resolveStyle, type Effects, type Project, type Style } from './schema';
 import type { Media } from './media';
 
 function fade(t: number, t0: number, t1: number, fi: number, fo: number): number {
@@ -158,6 +158,8 @@ export interface TextLayout {
   width: number;
   height: number;
   anchor: 'left' | 'center' | 'right';
+  /** style effectif (style nommé + surcharges du texte) */
+  style: Style;
 }
 
 /** Règle la police sur `ctx` et calcule la mise en page d'un texte. Partagé par le rendu et l'éditeur. */
@@ -167,15 +169,19 @@ export function layoutText(
   l: Extract<Layer, { kind: 'text' }>,
   W: number,
 ): TextLayout | null {
-  const st = project.styles[l.style];
-  if (!st) return null;
-  ctx.font = `${st.size}px "${fontFamily(st.font)}", serif`;
+  const base = project.styles[l.style];
+  if (!base) return null;
+  const st = resolveStyle(base, l.ref);
+  ctx.font = `${st.italic ? 'italic ' : ''}${st.bold ? 'bold ' : ''}${st.size}px "${fontFamily(st.font)}", serif`;
   ctx.textAlign = st.anchor ?? 'center';
   ctx.textBaseline = 'middle';
   const lh = st.size * (st.line_height ?? 1.3);
-  const lines = wrap(ctx, l.content, st.max_width ?? W - 240);
-  const width = Math.max(...lines.map((s) => ctx.measureText(s).width), 1);
-  return { lines, lh, width, height: lines.length * lh, anchor: st.anchor ?? 'center' };
+  const boxWidth: number | undefined = l.ref?.width;
+  const lines = wrap(ctx, l.content, boxWidth ?? st.max_width ?? W - 240);
+  const textWidth = Math.max(...lines.map((s) => ctx.measureText(s).width), 1);
+  // zone de texte explicite : c'est elle qui est sélectionnée, pas seulement le texte écrit dedans
+  const width = boxWidth ?? textWidth;
+  return { lines, lh, width, height: lines.length * lh, anchor: st.anchor ?? 'center', style: st };
 }
 
 function drawLayer(
@@ -189,9 +195,9 @@ function drawLayer(
   ctx.save();
   ctx.globalAlpha = alpha;
   if (l.kind === 'text') {
-    const st = project.styles[l.style];
     const lay = layoutText(ctx, project, l, W);
-    if (st && lay) {
+    if (lay) {
+      const st = lay.style;
       ctx.fillStyle = st.color;
       if (st.shadow) {
         ctx.shadowColor = st.shadow.color;
