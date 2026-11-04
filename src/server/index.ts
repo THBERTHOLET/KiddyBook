@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync,
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectSchema, type Project } from '../shared/schema';
-import { startExport, type Job } from './export';
+import { audioDurations, startExport, type Job } from './export';
 import { playableVideo } from './proxy';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -148,6 +148,10 @@ function walk(dir: string, out: string[] = []): string[] {
   }
   return out;
 }
+
+app.get('/api/audio-durations', async (_req, res) => {
+  res.json(await audioDurations(projectDir));
+});
 
 app.get('/api/assets', (_req, res) => {
   res.json(walk(join(projectDir, 'assets')).sort());

@@ -36,6 +36,11 @@ export const TextSchema = z.object({
   style: z.string(),
   content: z.string(),
   position: Vec2,
+  /**
+   * `id` d'un passage audio de la même scène : le texte apparaît quand ce passage démarre (`start` = décalage)
+   * et disparaît quand il se termine, sauf `duration` explicite.
+   */
+  sync: z.string().optional(),
   ...timing,
 });
 
@@ -92,6 +97,14 @@ export const ElementSchema = z.union([
 
 export const AudioSchema = z.object({
   name: z.string().optional(),
+  /** Identifiant stable, créé quand un texte se synchronise sur ce passage. */
+  id: z.string().optional(),
+  /**
+   * `narration` : déclenche l'atténuation de la musique et sert à la durée automatique de la scène.
+   * `music` : atténuée sous la narration (valeur par défaut des pistes globales).
+   * `sfx` : bruitage, sans effet sur les autres pistes (valeur par défaut des pistes de scène).
+   */
+  role: z.enum(['narration', 'music', 'sfx']).optional(),
   file: z.string(),
   /** Point de départ dans le fichier (s) : permet de jouer un extrait d'une narration plus longue. */
   offset: z.number().min(0).optional(),
@@ -116,6 +129,9 @@ export const SceneSchema = z.object({
   page_index: z.number().int().optional(),
   background: z.string().optional(),
   duration: z.number().positive(),
+  /** La durée suit la fin de la dernière narration de la scène + `end_pad` ; `duration` sert de repli. */
+  auto_duration: z.boolean().optional(),
+  end_pad: z.number().min(0).optional(),
   fade_in: z.number().min(0).optional(),
   fade_out: z.number().min(0).optional(),
   illustration: ImageSchema.optional(),
@@ -133,6 +149,18 @@ export const ProjectSchema = z
       output_file: z.string().min(1),
     }),
     styles: z.record(z.string(), StyleSchema),
+    /** Atténuation automatique de la musique pendant les narrations. */
+    ducking: z
+      .object({
+        enabled: z.boolean().optional(),
+        /** réduction appliquée à la musique, en dB (négatif) */
+        level_db: z.number().max(0).optional(),
+        /** durée de la descente, avant le début de la narration (s) */
+        attack: z.number().min(0).optional(),
+        /** durée de la remontée, après la fin de la narration (s) */
+        release: z.number().min(0).optional(),
+      })
+      .optional(),
     global_audio_tracks: z.array(AudioSchema).optional(),
     timeline: z.array(SceneSchema).min(1),
   })

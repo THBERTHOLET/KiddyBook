@@ -1,4 +1,4 @@
-import { compile, sceneAt, type Compiled, type Layer } from '../shared/compile';
+import { compile, sceneAt, type Compiled, type Durations, type Layer } from '../shared/compile';
 import { Media } from '../shared/media';
 import { layoutText, renderFrame } from '../shared/render';
 import { ProjectSchema, type Project, type Scene } from '../shared/schema';
@@ -34,6 +34,7 @@ const setStatus = (msg: string, err = false) => {
  */
 function serialize(): string {
   const clone = JSON.parse(JSON.stringify(project)) as Project;
+  if (clone.ducking && !Object.keys(clone.ducking).length) delete clone.ducking;
   for (const sc of clone.timeline) {
     for (const el of sc.elements ?? []) {
       const fx = (el as any).effects;
@@ -77,8 +78,13 @@ function scheduleSave() {
   }, 600);
 }
 
+/** Durées des fichiers audio (ffprobe côté serveur) : nécessaires aux durées automatiques et aux synchros. */
+let audioDur: Durations = {};
+const compileNow = () => compile(project, audioDur);
+
 async function refreshAssets() {
   assets = await (await fetch('/api/assets')).json();
+  audioDur = await (await fetch('/api/audio-durations')).json();
   await media.loadFonts(assets);
   const ext = (re: RegExp) => assets.filter((a) => re.test(a));
   const lists: Record<string, string[]> = {
@@ -101,7 +107,7 @@ async function refreshAssets() {
 /** Modification de valeur (frappe) : pas de reconstruction des panneaux, pour garder le focus. */
 async function changed() {
   const parsed = ProjectSchema.safeParse(project);
-  compiled = compile(project);
+  compiled = compileNow();
   fitViewport();
   const wasPlaying = playing;
   if (wasPlaying) pause();
@@ -177,7 +183,7 @@ function play() {
   $('play').textContent = '⏸';
   tStart = t;
   wallStart = performance.now();
-  void audio.start(compiled.audio, t);
+  void audio.start(compiled.audio, t, compiled.duck);
   const tick = async () => {
     if (!playing) return;
     t = tStart + (performance.now() - wallStart) / 1000;
@@ -255,7 +261,7 @@ function renderSceneList() {
           },
         },
         h('span', { class: 'name' }, `${i + 1}. ${sceneLabel(s, i)}`),
-        h('span', { class: 'dur' }, `${s.duration}s`),
+        h('span', { class: 'dur' }, `${+compiled.scenes[i].duration.toFixed(1)}s${s.auto_duration ? ' auto' : ''}`),
       ),
     ),
     h(
@@ -462,6 +468,32 @@ function effectsForm(o: any): HTMLElement {
   return d;
 }
 
+/** Synchronise un texte sur un passage audio de la scène : il apparaît et disparaît avec lui. */
+function syncRows(o: any): HTMLElement[] {
+  const clips = (project.timeline[selScene].audio ?? []).map((a, i) => ({ a, i }));
+  const sel = h('select', {
+    onchange: (e: Event) => {
+      const v = (e.target as HTMLSelectElement).value;
+      if (v === '') delete o.sync;
+      else {
+        const a = clips[Number(v)].a;
+        a.id ??= 'a' + Math.random().toString(36).slice(2, 8); // identifiant stable, créé à la demande
+        o.sync = a.id;
+      }
+      void rebuild();
+    },
+  },
+    h('option', { value: '' }, '— manuel'),
+    ...clips.map(({ a, i }) => h('option', { value: String(i) }, `${a.name ?? `Audio ${i + 1}`} (${ROLE_LABELS[a.role ?? 'sfx']})`)),
+  ) as HTMLSelectElement;
+  const idx = clips.findIndex(({ a }) => a.id && a.id === o.sync);
+  sel.value = idx >= 0 ? String(idx) : '';
+  const rows = [row('Synchro audio', sel)];
+  if (idx >= 0) rows.push(h('div', { class: 'hint' }, 'Apparaît au début du passage et disparaît à sa fin. « Début » = décalage ; « Durée » vide = jusqu’à la fin du passage.'));
+  else if (o.sync) rows.push(h('div', { class: 'errtext' }, 'Le passage audio synchronisé n’existe plus : le texte est en mode manuel.'));
+  return rows;
+}
+
 /** Formulaire d'une couche, lié à la sélection sur le canvas. */
 function layerForm(o: any, kind: 'text' | 'image' | 'video', title: string, onDelete?: () => void, onMove?: (d: number) => void) {
   const fs = buildLayerForm(o, kind, title, onDelete, onMove);
@@ -548,6 +580,7 @@ function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string,
       row('Style', selectField(o, 'style', Object.keys(project.styles), changed)),
       areaField(o, 'content', changed),
       row('Position', ...vecField(o, 'position', changed)),
+      ...syncRows(o),
       ...timingRows(o),
     );
   }
@@ -567,17 +600,33 @@ async function audition(a: any) {
   pause();
   await audio.preload([a.file], (f) => media.url(f));
   await audio.start([{
-    file: a.file, start: 0, duration: a.duration ?? (a.loop ? 10 : undefined), volume: a.volume ?? 1,
+    file: a.file, role: a.role ?? 'sfx', start: 0, duration: a.duration ?? (a.loop ? 10 : undefined), volume: a.volume ?? 1,
     loop: !!a.loop, fadeIn: a.fade_in ?? 0, fadeOut: a.fade_out ?? 0, offset: a.offset ?? 0,
   }], 0);
 }
 
-function audioForm(o: any, title: string, onDelete: () => void) {
+const ROLE_LABELS: Record<string, string> = { narration: 'Narration', music: 'Musique', sfx: 'Effet sonore' };
+
+/** Type d'un passage audio. Narration : atténue la musique et fixe la durée automatique de la scène. */
+function roleSelect(o: any, def: 'music' | 'sfx') {
+  const sel = h('select', {
+    onchange: (e: Event) => {
+      o.role = (e.target as HTMLSelectElement).value;
+      void rebuild(); // les listes de synchro et la durée de la scène en dépendent
+    },
+  }, ...Object.entries(ROLE_LABELS).map(([v, label]) => h('option', { value: v }, label))) as HTMLSelectElement;
+  sel.value = o.role ?? def;
+  return sel;
+}
+
+function audioForm(o: any, title: string, onDelete: () => void, defaultRole: 'music' | 'sfx' = 'sfx') {
+  const len = o.duration ?? (audioDur[o.file] != null ? audioDur[o.file] - (o.offset ?? 0) : undefined);
   return fieldset({ key: o, title, rename: true }, [h('button', { class: 'small', title: 'Écouter ce passage seul (Échap pour arrêter)', onclick: () => audition(o) }, '▶'), delBtn(onDelete)],
     row('Fichier', textField(o, 'file', changed, { list: 'dl-audio', folder: 'audio' })),
+    row('Type', roleSelect(o, defaultRole)),
     row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'dans la scène')),
     row('Lire dès (s)', numField(o, 'offset', changed, { min: 0, step: 0.1, optional: true }), h('span', { class: 'hint' }, 'dans le fichier')),
-    row('Durée (s)', numField(o, 'duration', changed, { min: 0.1, optional: true })),
+    row('Durée (s)', Object.assign(numField(o, 'duration', changed, { min: 0.1, optional: true }), { placeholder: len != null ? len.toFixed(1) : '' }), h('span', { class: 'hint' }, len != null ? 'vide = jusqu’à la fin du fichier' : '')),
     row('Volume', numField(o, 'volume', changed, { min: 0, step: 0.05, optional: true })),
     row('Fondu', numField(o, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(o, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
     row('Boucle', checkField(o, 'loop', changed)),
@@ -611,7 +660,13 @@ function scenePane(): HTMLElement[] {
       row('Type', selectField(s, 'type', ['cover', 'page', 'end'], rebuild)),
       row('N° de page', numField(s, 'page_index', changed, { step: 1, optional: true })),
       row('Fond', textField(s, 'background', changed, { list: 'dl-img', optional: true, folder: 'backgrounds' })),
-      row('Durée (s)', numField(s, 'duration', changed, { min: 0.5 })),
+      row('Durée (s)', numField(s, 'duration', changed, { min: 0.5 }),
+        h('span', { class: 'hint' }, s.auto_duration ? `auto : ${compiled.scenes[selScene].duration.toFixed(1)} s` : '')),
+      row('Durée auto', checkField(s, 'auto_duration', rebuild), numField(s, 'end_pad', changed, { min: 0, step: 0.1, optional: true }),
+        h('span', { class: 'hint' }, 's de marge (déf. 1)')),
+      s.auto_duration && !(s.audio ?? []).some((a) => a.role === 'narration')
+        ? h('div', { class: 'hint' }, 'Aucun passage de type Narration dans cette scène : la durée manuelle est utilisée.')
+        : h('div', { class: 'hint' }, 'Durée auto = fin de la dernière narration + marge.'),
       row('Fondu', numField(s, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(s, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
     ),
   ];
@@ -648,7 +703,7 @@ function scenePane(): HTMLElement[] {
   );
 
   // audio
-  (s.audio ??= []).forEach((a, i) => out.push(audioForm(a, `Audio ${i + 1}`, () => (s.audio!.splice(i, 1), rebuild()))));
+  (s.audio ??= []).forEach((a, i) => out.push(audioForm(a, `Audio ${i + 1}`, () => (s.audio!.splice(i, 1), rebuild()), 'sfx')));
   out.push(h('button', { onclick: () => (s.audio!.push({ file: '', start: 0, volume: 1 }), rebuild()) }, '+ Piste audio'));
 
   // transition
@@ -703,9 +758,17 @@ function renameStyle(old: string) {
 
 function audioPane(): HTMLElement[] {
   const g = (project.global_audio_tracks ??= []);
+  const dk = (project.ducking ??= {});
   return [
+    fieldset('Atténuation de la musique', [],
+      row('Activer', checkField(dk, 'enabled', rebuild)),
+      row('Réduction (dB)', numField(dk, 'level_db', changed, { max: 0, step: 1, optional: true }), h('span', { class: 'hint' }, 'déf. −12')),
+      row('Descente (s)', numField(dk, 'attack', changed, { min: 0, step: 0.1, optional: true }), h('span', { class: 'hint' }, 'avant la narration')),
+      row('Remontée (s)', numField(dk, 'release', changed, { min: 0, step: 0.1, optional: true }), h('span', { class: 'hint' }, 'après la narration')),
+      h('div', { class: 'hint' }, 'Les pistes de type Musique baissent pendant chaque passage de type Narration.'),
+    ),
     h('p', { class: 'hint' }, 'Pistes jouées sur toute la vidéo (musique de fond…). Les pistes propres à une scène sont dans l’onglet Scène.'),
-    ...g.map((a, i) => audioForm(a, `Piste globale ${i + 1}`, () => (g.splice(i, 1), rebuild()))),
+    ...g.map((a, i) => audioForm(a, `Piste globale ${i + 1}`, () => (g.splice(i, 1), rebuild()), 'music')),
     h('button', { onclick: () => (g.push({ file: '', start: 0, volume: 0.2, loop: true, fade_in: 2, fade_out: 3 }), rebuild()) }, '+ Piste globale'),
   ];
 }
@@ -909,7 +972,7 @@ async function dropOnScene(e: DragEvent, zone: 'bg' | 'el') {
       added.push(el);
     } else if (k === 'audio') (s.audio ??= []).push({ file: p, start: 0, volume: 1 });
   }
-  compiled = compile(project);
+  compiled = compileNow();
   await media.preload(compiled);
   for (const el of added) {
     // taille initiale : tient à 60 % de l'écran, centré sur le point de dépôt
@@ -1155,7 +1218,7 @@ overlay.addEventListener('pointermove', (e) => {
     ref.position = [Math.round(x1), Math.round(y1)];
     ref.size = [Math.round(x2 - x1), Math.round(y2 - y1)];
   }
-  compiled = compile(project);
+  compiled = compileNow();
   void draw(false);
 });
 
@@ -1209,7 +1272,7 @@ async function initProjects() {
     (sc.elements ??= []).unshift({ type: 'image', ...sc.illustration });
     delete sc.illustration;
   }
-  compiled = compile(project);
+  compiled = compileNow();
   await refreshAssets();
   await changed();
   renderInspector();

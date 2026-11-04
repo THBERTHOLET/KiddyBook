@@ -9,7 +9,8 @@ const w = window as any;
 (async () => {
   const project = ProjectSchema.parse(await (await fetch('/api/project')).json());
   const assets: string[] = await (await fetch('/api/assets')).json();
-  const c = compile(project);
+  // mêmes durées audio que le serveur : le nombre d'images doit être identique
+  const c = compile(project, await (await fetch('/api/audio-durations')).json());
   const media = new Media();
   await media.loadFonts(assets);
   // force le chargement des polices utilisées par les styles

@@ -1,4 +1,4 @@
-import type { AudioEvent } from '../shared/compile';
+import { duckBreakpoints, duckGain, type AudioEvent, type Duck } from '../shared/compile';
 
 /** Lecture WebAudio du mixage multipiste, au plus près de ce que fera ffmpeg. */
 export class AudioPlayer {
@@ -26,7 +26,7 @@ export class AudioPlayer {
     );
   }
 
-  async start(events: AudioEvent[], fromT: number) {
+  async start(events: AudioEvent[], fromT: number, duck?: Duck) {
     this.stop();
     await this.ctx.resume();
     const now = this.ctx.currentTime + 0.05;
@@ -46,10 +46,14 @@ export class AudioPlayer {
 
       const u0 = Math.max(0, fromT - e.start); // temps déjà écoulé dans l'événement
       const when = now + Math.max(0, e.start - fromT);
+      // la musique est atténuée sous les narrations (même courbe que dans l'export)
+      const ducked = duck && e.role === 'music' ? duck : undefined;
       const g = (u: number) =>
         e.volume *
-        Math.max(0, Math.min(e.fadeIn > 0 ? u / e.fadeIn : 1, e.fadeOut > 0 ? (len - u) / e.fadeOut : 1, 1));
-      const pts = [u0, e.fadeIn, len - e.fadeOut, len]
+        Math.max(0, Math.min(e.fadeIn > 0 ? u / e.fadeIn : 1, e.fadeOut > 0 ? (len - u) / e.fadeOut : 1, 1)) *
+        (ducked ? duckGain(ducked, e.start + u) : 1);
+      const duckPts = ducked ? duckBreakpoints(ducked).map((t) => t - e.start) : [];
+      const pts = [u0, e.fadeIn, len - e.fadeOut, len, ...duckPts]
         .filter((u) => u >= u0 && u <= len)
         .sort((a, b) => a - b);
       gain.gain.setValueAtTime(g(pts[0]), when);

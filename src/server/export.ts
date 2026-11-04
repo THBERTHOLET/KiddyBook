@@ -1,9 +1,9 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { chromium, type Browser } from 'playwright-core';
-import { compile, type AudioEvent } from '../shared/compile';
+import { compile, type AudioEvent, type Compiled, type Duck, type Durations } from '../shared/compile';
 import type { Project } from '../shared/schema';
 
 const run = promisify(execFile);
@@ -39,8 +39,48 @@ async function probeDuration(file: string): Promise<number | undefined> {
 
 const f = (n: number) => +n.toFixed(4);
 
+const AUDIO_EXT = /\.(mp3|wav|ogg|m4a|flac)$/i;
+const durationCache = new Map<string, { mtime: number; dur: number }>();
+
+/** Durée (s) de chaque fichier audio de assets/, mesurée par ffprobe (mise en cache selon la date du fichier). */
+export async function audioDurations(projectDir: string): Promise<Durations> {
+  const out: Durations = {};
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (AUDIO_EXT.test(e.name)) files.push(p);
+    }
+  };
+  walk(join(projectDir, 'assets'));
+  await Promise.all(
+    files.map(async (p) => {
+      const mtime = statSync(p).mtimeMs;
+      let hit = durationCache.get(p);
+      if (!hit || hit.mtime !== mtime) {
+        const dur = await probeDuration(p);
+        if (dur == null) return;
+        hit = { mtime, dur };
+        durationCache.set(p, hit);
+      }
+      out[relative(projectDir, p).split(sep).join('/')] = hit.dur;
+    }),
+  );
+  return out;
+}
+
+/** Expression ffmpeg du gain d'atténuation (même courbe que `duckGain`) : trapèzes unis par max(). */
+function duckExpr(d: Duck): string {
+  const env = d.intervals
+    .map(([a, b]) => `clip(min((t-${f(a - d.attack)})/${f(d.attack)},(${f(b + d.release)}-t)/${f(d.release)}),0,1)`)
+    .reduce((acc, e) => `max(${acc},${e})`);
+  return `1-${f(1 - d.level)}*(${env})`;
+}
+
 /** Mixage multipiste : chaque événement est calé (adelay), volumé, fondu, puis sommé. */
-async function buildAudio(events: AudioEvent[], total: number, dir: string, warnings: string[]) {
+async function buildAudio(events: AudioEvent[], total: number, dir: string, warnings: string[], duck?: Duck) {
   const inputs: string[] = [];
   const chains: string[] = [];
   for (const e of events) {
@@ -68,6 +108,8 @@ async function buildAudio(events: AudioEvent[], total: number, dir: string, warn
     if (e.fadeOut > 0 && dur != null) c += `,afade=t=out:st=${f(Math.max(0, dur - e.fadeOut))}:d=${f(e.fadeOut)}`;
     const ms = Math.round(e.start * 1000);
     if (ms > 0) c += `,adelay=${ms}|${ms}`;
+    // après adelay, le temps `t` du filtre est le temps global de la vidéo
+    if (duck && e.role === 'music') c += `,volume='${duckExpr(duck)}':eval=frame`;
     chains.push(`${c}[a${k}]`);
   }
   if (!chains.length) return null;
@@ -89,10 +131,11 @@ export interface ExportOptions {
 
 export function startExport(opts: ExportOptions): { job: Job; cancel: () => void } {
   const { project, projectDir } = opts;
-  const c = compile(project);
   const fps = project.project.fps;
-  const frames = Math.max(1, Math.round(c.total * fps));
-  const job: Job = { status: 'running', frame: 0, total: frames, warnings: [], startedAt: Date.now() };
+  // le total n'est connu qu'après la mesure des durées audio (scènes à durée automatique)
+  let c!: Compiled;
+  let frames = 0;
+  const job: Job = { status: 'running', frame: 0, total: 0, warnings: [], startedAt: Date.now() };
   let cancelled = false;
   let browser: Browser | undefined;
   let ff: ReturnType<typeof spawn> | undefined;
@@ -115,9 +158,13 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
     const exportsDir = join(projectDir, 'exports');
     mkdirSync(exportsDir, { recursive: true });
     const out = join(exportsDir, project.project.output_file);
+    c = compile(project, await audioDurations(projectDir));
+    frames = Math.max(1, Math.round(c.total * fps));
+    job.total = frames;
+    if (cancelled) return;
     // Passe 1 : mixage de toutes les pistes dans un WAV unique. Garder plusieurs entrées audio
     // dans le même ffmpeg que la vidéo en pipe provoque des blocages (files de paquets pleines).
-    const mix = await buildAudio(c.audio, c.total, projectDir, job.warnings);
+    const mix = await buildAudio(c.audio, c.total, projectDir, job.warnings, c.duck);
     const mixFile = join(exportsDir, '.mix.wav');
     if (mix) {
       try {

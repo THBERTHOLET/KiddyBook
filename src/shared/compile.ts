@@ -33,9 +33,12 @@ export interface Overlay {
   t1: number;
 }
 
+export type AudioRole = 'narration' | 'music' | 'sfx';
+
 /** Piste audio à plat, en temps global. */
 export interface AudioEvent {
   file: string;
+  role: AudioRole;
   start: number;
   /** Durée de lecture ; indéfinie = durée naturelle du fichier. Toujours définie si `loop`. */
   duration?: number;
@@ -47,25 +50,49 @@ export interface AudioEvent {
   offset: number;
 }
 
+/** Atténuation de la musique : `intervals` = plages de narration, en temps global. */
+export interface Duck {
+  /** gain linéaire atteint pendant la narration (0.25 ≈ -12 dB) */
+  level: number;
+  attack: number;
+  release: number;
+  intervals: [number, number][];
+}
+
 export interface Compiled {
   total: number;
   scenes: CompiledScene[];
   overlays: Overlay[];
   audio: AudioEvent[];
+  duck?: Duck;
   /** Fichiers référencés, par catégorie. */
   files: { images: Set<string>; videos: Set<string>; audio: Set<string> };
 }
 
+/** Durées (s) des fichiers audio, mesurées par ffprobe côté serveur. */
+export type Durations = Record<string, number>;
+
 function timed(
   e: { start?: number; duration?: number; fade_in?: number; fade_out?: number },
   sceneDuration: number,
+  /** plage imposée par un passage audio synchronisé (temps de scène) */
+  sync?: { start: number; end: number },
 ): LayerBase {
-  const t0 = Math.min(e.start ?? 0, sceneDuration);
-  const t1 = Math.min(e.duration != null ? t0 + e.duration : sceneDuration, sceneDuration);
-  return { ref: e, t0, t1, fadeIn: e.fade_in ?? 0, fadeOut: e.fade_out ?? 0 };
+  const base = sync ? sync.start + (e.start ?? 0) : (e.start ?? 0);
+  const t0 = Math.min(base, sceneDuration);
+  const natural = sync ? sync.end : sceneDuration;
+  const t1 = Math.min(e.duration != null ? t0 + e.duration : natural, sceneDuration);
+  return { ref: e, t0, t1: Math.max(t0, t1), fadeIn: e.fade_in ?? 0, fadeOut: e.fade_out ?? 0 };
 }
 
-export function compile(project: Project): Compiled {
+/** Durée jouée d'un passage audio non bouclé, si elle est connue. */
+function clipLength(a: { file: string; duration?: number; offset?: number }, durations: Durations): number | undefined {
+  if (a.duration != null) return a.duration;
+  const full = durations[a.file];
+  return full != null ? Math.max(0.05, full - (a.offset ?? 0)) : undefined;
+}
+
+export function compile(project: Project, durations: Durations = {}): Compiled {
   const scenes: CompiledScene[] = [];
   const overlays: Overlay[] = [];
   const audio: AudioEvent[] = [];
@@ -74,8 +101,27 @@ export function compile(project: Project): Compiled {
   let cursor = 0;
   for (const [index, scene] of project.timeline.entries()) {
     const start = cursor;
-    const end = start + scene.duration;
+
+    // Passages audio de la scène (temps de scène). Les boucles se calent sur la durée finale, calculée après.
+    const clips = (scene.audio ?? []).map((a) => ({
+      a,
+      role: a.role ?? 'sfx',
+      s: a.start ?? 0,
+      len: a.loop ? undefined : clipLength(a, durations),
+    }));
+
+    // Durée automatique : fin de la dernière narration + marge
+    let duration = scene.duration;
+    if (scene.auto_duration) {
+      const ends = clips.filter((c) => c.role === 'narration' && c.len != null && !c.a.loop).map((c) => c.s + c.len!);
+      if (ends.length) duration = Math.max(0.5, Math.max(...ends) + (scene.end_pad ?? 1));
+    }
+    const end = start + duration;
     const layers: Layer[] = [];
+
+    // passages synchronisables, par id
+    const syncs = new Map<string, { start: number; end: number }>();
+    for (const c of clips) if (c.a.id && c.len != null) syncs.set(c.a.id, { start: c.s, end: c.s + c.len });
 
     if (scene.background && !scene.background.startsWith('#')) files.images.add(scene.background);
 
@@ -86,7 +132,7 @@ export function compile(project: Project): Compiled {
         pos: e.position,
         size: e.size,
         effects: e.effects,
-        ...timed(e, scene.duration),
+        ...timed(e, duration),
       });
       (kind === 'image' ? files.images : files.videos).add(e.file);
     };
@@ -96,7 +142,7 @@ export function compile(project: Project): Compiled {
         style: e.style,
         content: e.content,
         pos: e.position,
-        ...timed(e, scene.duration),
+        ...timed(e, duration, e.sync ? syncs.get(e.sync) : undefined),
       });
 
     if (scene.illustration) pushMedia('image', scene.illustration);
@@ -106,13 +152,14 @@ export function compile(project: Project): Compiled {
     }
     for (const t of scene.texts ?? []) pushText(t);
 
-    for (const a of scene.audio ?? []) {
-      const s = start + (a.start ?? 0);
+    for (const c of clips) {
+      const { a } = c;
       files.audio.add(a.file);
       audio.push({
         file: a.file,
-        start: s,
-        duration: a.loop ? (a.duration ?? end - s) : a.duration,
+        role: c.role,
+        start: start + c.s,
+        duration: a.loop ? (a.duration ?? duration - c.s) : c.len,
         volume: a.volume ?? 1,
         loop: !!a.loop,
         fadeIn: a.fade_in ?? 0,
@@ -132,7 +179,7 @@ export function compile(project: Project): Compiled {
       index,
       start,
       end,
-      duration: scene.duration,
+      duration,
       fadeIn: scene.fade_in ?? 0,
       fadeOut: scene.fade_out ?? 0,
       scene,
@@ -147,8 +194,9 @@ export function compile(project: Project): Compiled {
     files.audio.add(a.file);
     audio.push({
       file: a.file,
+      role: a.role ?? 'music',
       start: s,
-      duration: a.loop ? (a.duration ?? Math.max(0.1, total - s)) : a.duration,
+      duration: a.loop ? (a.duration ?? Math.max(0.1, total - s)) : clipLength(a, durations),
       volume: a.volume ?? 1,
       loop: !!a.loop,
       fadeIn: a.fade_in ?? 0,
@@ -157,10 +205,40 @@ export function compile(project: Project): Compiled {
     });
   }
 
-  return { total, scenes, overlays, audio, files };
+  let duck: Duck | undefined;
+  const d = project.ducking;
+  if (d?.enabled) {
+    const intervals = audio
+      .filter((e) => e.role === 'narration' && !e.loop && e.duration != null)
+      .map((e): [number, number] => [e.start, e.start + e.duration!]);
+    if (intervals.length) {
+      duck = {
+        level: Math.pow(10, (d.level_db ?? -12) / 20),
+        attack: Math.max(0.01, d.attack ?? 0.4),
+        release: Math.max(0.01, d.release ?? 0.8),
+        intervals,
+      };
+    }
+  }
+
+  return { total, scenes, overlays, audio, duck, files };
 }
 
 export function sceneAt(c: Compiled, t: number): CompiledScene {
   for (const s of c.scenes) if (t >= s.start && t < s.end) return s;
   return c.scenes[c.scenes.length - 1];
+}
+
+/** Gain de la musique à l'instant `t` : 1 hors narration, `level` pendant, avec descente et remontée linéaires. */
+export function duckGain(d: Duck, t: number): number {
+  let env = 0;
+  for (const [a, b] of d.intervals) {
+    env = Math.max(env, Math.min(1, (t - (a - d.attack)) / d.attack, (b + d.release - t) / d.release));
+  }
+  return 1 - (1 - d.level) * Math.max(0, env);
+}
+
+/** Instants où la courbe d'atténuation change de pente (pour la programmer dans WebAudio). */
+export function duckBreakpoints(d: Duck): number[] {
+  return d.intervals.flatMap(([a, b]) => [a - d.attack, a, b, b + d.release]);
 }

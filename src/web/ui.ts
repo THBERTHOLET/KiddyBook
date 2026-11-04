@@ -48,12 +48,13 @@ export function areaField(o: Obj, k: string, notify: Notify) {
   return a;
 }
 
-export function numField(o: Obj, k: string, notify: Notify, opt: { step?: number; min?: number; optional?: boolean } = {}) {
+export function numField(o: Obj, k: string, notify: Notify, opt: { step?: number; min?: number; max?: number; optional?: boolean } = {}) {
   return h('input', {
     type: 'number',
     value: o[k] ?? '',
     step: opt.step ?? 0.1,
     min: opt.min,
+    max: opt.max,
     oninput: (e: Event) => {
       const raw = (e.target as HTMLInputElement).value;
       if (raw === '') {
