@@ -4,7 +4,7 @@ import { join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { chromium, type Browser } from 'playwright-core';
 import { compile, type AudioEvent, type Compiled, type Duck, type Durations } from '../shared/compile';
-import type { Project } from '../shared/schema';
+import { outputName, type Project } from '../shared/schema';
 
 const run = promisify(execFile);
 
@@ -127,11 +127,14 @@ export interface ExportOptions {
   origin: string; // origine de la page d'export (Vite en dev, serveur en prod)
   crf: number;
   jpegQuality: number;
+  /** langue à exporter (textes et narrations) ; le MP4 porte son code : `livre.en.mp4` */
+  lang?: string;
 }
 
 export function startExport(opts: ExportOptions): { job: Job; cancel: () => void } {
   const { project, projectDir } = opts;
   const fps = project.project.fps;
+  const outFile = outputName(project.project.output_file, opts.lang);
   // le total n'est connu qu'après la mesure des durées audio (scènes à durée automatique)
   let c!: Compiled;
   let frames = 0;
@@ -157,8 +160,8 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
   (async () => {
     const exportsDir = join(projectDir, 'exports');
     mkdirSync(exportsDir, { recursive: true });
-    const out = join(exportsDir, project.project.output_file);
-    c = compile(project, await audioDurations(projectDir));
+    const out = join(exportsDir, outFile);
+    c = compile(project, await audioDurations(projectDir), opts.lang);
     frames = Math.max(1, Math.round(c.total * fps));
     job.total = frames;
     if (cancelled) return;
@@ -195,7 +198,7 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
 
     const page = await browser.newPage();
     page.on('pageerror', (e) => job.warnings.push(`Page d'export : ${e.message}`));
-    await page.goto(`${opts.origin}/export.html`);
+    await page.goto(`${opts.origin}/export.html${opts.lang ? `?lang=${encodeURIComponent(opts.lang)}` : ''}`);
     await page.waitForFunction('window.__ready === true', undefined, { timeout: 60000 });
     const missing = (await page.evaluate('window.__missing')) as string[];
     for (const m of missing) job.warnings.push(`Média introuvable (placeholder rendu) : ${m}`);
@@ -240,7 +243,7 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
       throw new Error(`ffmpeg a échoué (code ${code}) : ${stderr.slice(-800)}`);
     } else {
       job.status = 'done';
-      job.output = project.project.output_file;
+      job.output = outFile;
     }
   })()
     .catch((e) => {
@@ -253,7 +256,7 @@ export function startExport(opts: ExportOptions): { job: Job; cancel: () => void
       const exportsDir = join(projectDir, 'exports');
       rmSync(join(exportsDir, '.mix.wav'), { force: true });
       // une annulation ou un échec laisse un MP4 incomplet : on ne le garde pas
-      if (ff && job.status !== 'done') rmSync(join(exportsDir, project.project.output_file), { force: true });
+      if (ff && job.status !== 'done') rmSync(join(exportsDir, outFile), { force: true });
     });
 
   return { job, cancel };

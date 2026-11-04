@@ -207,6 +207,7 @@ app.post('/api/export', requireProject, express.json(), (req, res) => {
     origin,
     crf: Number(req.body?.crf ?? 18),
     jpegQuality: Number(req.body?.jpegQuality ?? 0.95),
+    lang: typeof req.body?.lang === 'string' && req.body.lang ? req.body.lang : undefined,
   });
   res.json({ ok: true });
 });

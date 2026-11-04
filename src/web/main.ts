@@ -1,7 +1,7 @@
 import { compile, sceneAt, type Compiled, type Durations, type Layer } from '../shared/compile';
 import { Media } from '../shared/media';
 import { layoutText, renderFrame } from '../shared/render';
-import { ProjectSchema, resolveStyle, TEXT_OVERRIDES, type Project, type Scene } from '../shared/schema';
+import { audioFor, outputName, ProjectSchema, resolveStyle, TEXT_OVERRIDES, type Project, type Scene } from '../shared/schema';
 import { AudioPlayer } from './audio';
 import { areaField, checkField, fmtTime, h, numField, row, selectField, textField, vecField } from './ui';
 
@@ -80,7 +80,26 @@ function scheduleSave() {
 
 /** Durées des fichiers audio (ffprobe côté serveur) : nécessaires aux durées automatiques et aux synchros. */
 let audioDur: Durations = {};
-const compileNow = () => compile(project, audioDur);
+/** Langue affichée dans l'aperçu (la première de `project.languages` par défaut). */
+let lang = '';
+const activeLang = (): string | undefined => {
+  const ls = project?.languages ?? [];
+  return ls.includes(lang) ? lang : ls[0];
+};
+const compileNow = () => compile(project, audioDur, activeLang());
+
+/** Sélecteur de langue de l'en-tête : visible seulement si le projet déclare des langues. */
+function initLangSelect() {
+  const sel = $<HTMLSelectElement>('lang-select');
+  const ls = project.languages ?? [];
+  sel.hidden = ls.length === 0;
+  sel.replaceChildren(...ls.map((l, i) => h('option', { value: l }, i === 0 ? `${l} (défaut)` : l)));
+  sel.value = activeLang() ?? '';
+  sel.onchange = () => {
+    lang = sel.value;
+    void rebuild();
+  };
+}
 
 async function refreshAssets() {
   assets = await (await fetch('/api/assets')).json();
@@ -584,6 +603,29 @@ function sizeHelpers(o: any, kind: 'image' | 'video'): HTMLElement[] {
   ];
 }
 
+/** Texte du paragraphe : une zone par langue si le projet en déclare, sinon une seule. */
+function contentFields(o: any): HTMLElement[] {
+  const ls = project.languages ?? (typeof o.content === 'string' ? [] : Object.keys(o.content));
+  if (!ls.length) return [areaField(o, 'content', changed)];
+  return ls.map((l) => {
+    const get = () => (typeof o.content === 'string' ? (l === ls[0] ? o.content : '') : (o.content[l] ?? ''));
+    const area = h('textarea', {
+      placeholder: l === ls[0] ? '' : 'à traduire (sinon : texte de la langue par défaut)',
+      oninput: () => {
+        const v = area.value;
+        if (typeof o.content === 'string') {
+          if (l === ls[0]) o.content = v;
+          else o.content = { [ls[0]]: o.content, [l]: v };
+        } else if (v === '' && l !== ls[0]) delete o.content[l];
+        else o.content[l] = v;
+        void changed();
+      },
+    }) as HTMLTextAreaElement;
+    area.value = get();
+    return row(l === activeLang() ? `▸ ${l}` : l, area);
+  });
+}
+
 /** Liste « oui / non / comme le style » pour un booléen surchargeable. */
 function triState(o: any, k: 'bold' | 'italic', inherited: boolean) {
   const sel = h('select', {
@@ -632,7 +674,7 @@ function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string,
   if (kind === 'text') {
     return fieldset({ key: o, title, rename: true }, extra,
       row('Style', selectField(o, 'style', Object.keys(project.styles), rebuild)),
-      areaField(o, 'content', changed),
+      ...contentFields(o),
       row('Position', ...vecField(o, 'position', changed)),
       row('Largeur', numField(o, 'width', changed, { step: 10, min: 10, optional: true }), h('span', { class: 'hint' }, 'vide = auto · retour à la ligne')),
       ...textOverrideRows(o),
@@ -651,7 +693,8 @@ function buildLayerForm(o: any, kind: 'text' | 'image' | 'video', title: string,
 }
 
 /** Écoute un passage audio seul, avec son offset, sa durée et ses fondus. */
-async function audition(a: any) {
+async function audition(orig: any) {
+  const a = audioFor(orig, activeLang());
   if (!a.file) return;
   pause();
   await audio.preload([a.file], (f) => media.url(f));
@@ -686,7 +729,35 @@ function audioForm(o: any, title: string, onDelete: () => void, defaultRole: 'mu
     row('Volume', numField(o, 'volume', changed, { min: 0, step: 0.05, optional: true })),
     row('Fondu', numField(o, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(o, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
     row('Boucle', checkField(o, 'loop', changed)),
+    ...variantRows(o),
   );
+}
+
+/** Fichier, point de départ et durée propres à chaque langue (sauf la langue par défaut, qui utilise les champs de base). */
+function variantRows(o: any): HTMLElement[] {
+  const others = (project.languages ?? []).slice(1);
+  if (!others.length) return [];
+  const rows: HTMLElement[] = [h('div', { class: 'hint' }, `Les champs ci-dessus sont ceux de « ${project.languages![0]} ». Autres langues :`)];
+  for (const l of others) {
+    // l'objet n'est rattaché à `o.variants` que s'il contient quelque chose : pas de variantes vides dans le projet
+    const v: Record<string, any> = { ...(o.variants?.[l] ?? {}) };
+    const commit = () => {
+      for (const k of Object.keys(v)) if (v[k] === undefined) delete v[k];
+      if (Object.keys(v).length) (o.variants ??= {})[l] = v;
+      else if (o.variants) {
+        delete o.variants[l];
+        if (!Object.keys(o.variants).length) delete o.variants;
+      }
+      void changed();
+    };
+    const len = v.duration ?? (v.file && audioDur[v.file] != null ? audioDur[v.file] - (v.offset ?? 0) : undefined);
+    rows.push(
+      row(`Fichier ${l}`, textField(v, 'file', commit, { list: 'dl-audio', optional: true, folder: 'audio' })),
+      row(`Lire dès ${l}`, numField(v, 'offset', commit, { min: 0, optional: true }), h('span', { class: 'hint' }, 's')),
+      row(`Durée ${l}`, Object.assign(numField(v, 'duration', commit, { min: 0.1, optional: true }), { placeholder: len != null ? len.toFixed(1) : '' }), h('span', { class: 'hint' }, 's')),
+    );
+  }
+  return rows;
 }
 
 function scenePane(): HTMLElement[] {
@@ -883,6 +954,18 @@ function projectPane(): HTMLElement[] {
   const p = project.project;
   return [fieldset('Projet', [],
     row('Fichier MP4', textField(p, 'output_file', changed)),
+    row('Langues', h('input', {
+      type: 'text',
+      value: (project.languages ?? []).join(', '),
+      placeholder: 'ex. fr, en',
+      onchange: (e: Event) => {
+        const ls = [...new Set((e.target as HTMLInputElement).value.split(/[,\s]+/).filter(Boolean))];
+        if (ls.length) project.languages = ls;
+        else delete project.languages;
+        initLangSelect();
+        void rebuild();
+      },
+    }), h('span', { class: 'hint' }, 'la 1re est la langue par défaut')),
     row('FPS', numField(p, 'fps', changed, { step: 1, min: 1 })),
     row('Résolution', ...vecField(p, 'resolution', rebuild)),
     h('div', { class: 'hint' }, `Durée totale : ${fmtTime(compiled.total)}`),
@@ -898,10 +981,19 @@ $('export-btn').onclick = () => {
   dlg.replaceChildren(body);
   dlg.hidden = false;
 
+  const langs = project.languages ?? [];
+  const checks = langs.map((l) => ({ l, box: h('input', { type: 'checkbox', checked: true }) as HTMLInputElement }));
+
   const showForm = () =>
     body.replaceChildren(
       h('strong', {}, 'Exporter en MP4 (H.264 + AAC)'),
-      h('div', { class: 'hint' }, `${project.project.resolution.join('×')} à ${project.project.fps} fps — ${fmtTime(compiled.total)} — ${Math.round(compiled.total * project.project.fps)} images`),
+      h('div', { class: 'hint' }, `${project.project.resolution.join('×')} à ${project.project.fps} fps — ${fmtTime(compiled.total)} (${activeLang() ?? 'langue unique'}) — ${Math.round(compiled.total * project.project.fps)} images`),
+      ...(langs.length
+        ? [
+            h('div', { class: 'hint' }, 'Une vidéo par langue cochée (durées propres à chaque langue) :'),
+            ...checks.map(({ l, box }) => row(l, box, h('span', { class: 'hint' }, outputName(project.project.output_file, l)))),
+          ]
+        : []),
       row('Qualité CRF', crf, h('span', { class: 'hint' }, '18 = très bon, 23 = standard')),
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: start }, 'Lancer l’export'),
@@ -909,40 +1001,69 @@ $('export-btn').onclick = () => {
       ),
     );
 
+  /** Export des langues cochées, l'une après l'autre ; s'arrête à la première annulation ou erreur. */
   const start = async () => {
+    const todo: (string | undefined)[] = langs.length ? checks.filter((c) => c.box.checked).map((c) => c.l) : [undefined];
+    if (!todo.length) return;
+    const done: string[] = [];
+    for (const [i, lg] of todo.entries()) {
+      if (!(await launch(lg))) return;
+      const j = await watch(lg ? `${lg} (${i + 1}/${todo.length})` : '', done);
+      if (j.status !== 'done') return;
+      done.push(j.output);
+    }
+    finish(done);
+  };
+
+  const finish = (outputs: string[]) =>
+    body.replaceChildren(
+      h('strong', {}, outputs.length > 1 ? 'Exports terminés' : 'Export terminé'),
+      ...outputs.map((o) => h('a', { href: `/exports/${encodeURIComponent(o)}`, download: o }, h('button', { class: 'primary' }, `Télécharger ${o}`))),
+      h('div', { class: 'row' }, h('button', { onclick: () => (dlg.hidden = true) }, 'Fermer')),
+    );
+
+  /** Enregistre le projet puis lance l'export d'une langue. */
+  const launch = async (lg?: string): Promise<boolean> => {
     const saved = await fetch('/api/project', { method: 'PUT', headers: writeHeaders({ 'Content-Type': 'application/json' }), body: serialize() });
     if (saved.status === 409) {
       body.replaceChildren(h('div', { class: 'errtext' }, (await saved.json()).error), h('button', { onclick: () => location.reload() }, 'Recharger la page'));
-      return;
+      return false;
     }
     const r = await fetch('/api/export', {
       method: 'POST',
       headers: writeHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ origin: location.origin, crf: Number(crf.value) }),
+      body: JSON.stringify({ origin: location.origin, crf: Number(crf.value), lang: lg }),
     });
     if (!r.ok) {
       body.replaceChildren(h('div', { class: 'errtext' }, JSON.stringify(await r.json())), h('button', { onclick: showForm }, 'Retour'));
-      return;
+      return false;
     }
-    poll();
+    return true;
   };
 
-  const poll = async () => {
-    const j = await (await fetch('/api/export')).json();
-    const pct = j.total ? Math.round((j.frame / j.total) * 100) : 0;
-    const warns = (j.warnings ?? []) as string[];
-    const done = j.status !== 'running';
-    body.replaceChildren(...[
-      h('strong', {}, j.status === 'done' ? 'Export terminé' : j.status === 'error' ? 'Échec de l’export' : j.status === 'cancelled' ? 'Export annulé' : `Export en cours… ${pct}%`),
-      h('progress', { max: j.total || 1, value: j.frame ?? 0 }),
-      j.error ? h('div', { class: 'errtext' }, j.error) : null,
-      warns.length ? h('div', { class: 'warn' }, ...warns.map((w) => h('div', {}, '⚠ ' + w))) : null,
-      h('div', { class: 'row' },
-        j.status === 'done' ? h('a', { href: `/exports/${encodeURIComponent(j.output)}`, download: j.output }, h('button', { class: 'primary' }, 'Télécharger')) : null,
-        done ? h('button', { onclick: () => (dlg.hidden = true) }, 'Fermer') : h('button', { class: 'danger', onclick: () => fetch('/api/export/cancel', { method: 'POST' }) }, 'Annuler'),
-      ),
-    ].filter((x): x is HTMLElement => x != null));
-    if (!done) setTimeout(poll, 700);
+  /** Affiche la progression d'un export jusqu'à sa fin ; renvoie son état final. `label` : langue en cours. */
+  const watch = async (label: string, finished: string[]): Promise<any> => {
+    for (;;) {
+      const j = await (await fetch('/api/export')).json();
+      const running = j.status === 'running';
+      const last = !running && j.status !== 'done'; // erreur ou annulation : la boucle des langues s'arrête
+      const pct = j.total ? Math.round((j.frame / j.total) * 100) : 0;
+      const warns = (j.warnings ?? []) as string[];
+      const suffix = label ? ` — ${label}` : '';
+      body.replaceChildren(...[
+        h('strong', {}, j.status === 'error' ? 'Échec de l’export' : j.status === 'cancelled' ? 'Export annulé' : `Export en cours… ${pct}%${suffix}`),
+        h('progress', { max: j.total || 1, value: j.frame ?? 0 }),
+        finished.length ? h('div', { class: 'hint' }, `Terminé : ${finished.join(', ')}`) : null,
+        j.error ? h('div', { class: 'errtext' }, j.error) : null,
+        warns.length ? h('div', { class: 'warn' }, ...warns.map((w) => h('div', {}, '⚠ ' + w))) : null,
+        h('div', { class: 'row' },
+          running ? h('button', { class: 'danger', onclick: () => fetch('/api/export/cancel', { method: 'POST' }) }, 'Annuler')
+            : last ? h('button', { onclick: () => (dlg.hidden = true) }, 'Fermer') : null,
+        ),
+      ].filter((x): x is HTMLElement => x != null));
+      if (!running) return j;
+      await new Promise((r) => setTimeout(r, 700));
+    }
   };
 
   showForm();
@@ -1348,6 +1469,7 @@ async function initProjects() {
     (sc.elements ??= []).unshift({ type: 'image', ...sc.illustration });
     delete sc.illustration;
   }
+  initLangSelect();
   compiled = compileNow();
   await refreshAssets();
   await changed();

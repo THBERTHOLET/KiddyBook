@@ -1,4 +1,4 @@
-import type { Effects, Project, Scene } from './schema';
+import { audioFor, textFor, type Effects, type Project, type Scene } from './schema';
 
 interface LayerBase {
   /** Objet du projet dont la couche est issue (permet à l'éditeur de le modifier). */
@@ -92,7 +92,10 @@ function clipLength(a: { file: string; duration?: number; offset?: number }, dur
   return full != null ? Math.max(0.05, full - (a.offset ?? 0)) : undefined;
 }
 
-export function compile(project: Project, durations: Durations = {}): Compiled {
+/** `lang` : langue compilée (textes et narrations) ; par défaut la première de `project.languages`. */
+export function compile(project: Project, durations: Durations = {}, lang?: string): Compiled {
+  const def = project.languages?.[0];
+  lang ??= def;
   const scenes: CompiledScene[] = [];
   const overlays: Overlay[] = [];
   const audio: AudioEvent[] = [];
@@ -103,7 +106,7 @@ export function compile(project: Project, durations: Durations = {}): Compiled {
     const start = cursor;
 
     // Passages audio de la scène (temps de scène). Les boucles se calent sur la durée finale, calculée après.
-    const clips = (scene.audio ?? []).map((a) => ({
+    const clips = (scene.audio ?? []).map((orig) => audioFor(orig, lang)).map((a) => ({
       a,
       role: a.role ?? 'sfx',
       s: a.start ?? 0,
@@ -140,7 +143,7 @@ export function compile(project: Project, durations: Durations = {}): Compiled {
       layers.push({
         kind: 'text',
         style: e.style,
-        content: e.content,
+        content: textFor(e.content, lang, def),
         pos: e.position,
         ...timed(e, duration, e.sync ? syncs.get(e.sync) : undefined),
       });
@@ -189,7 +192,8 @@ export function compile(project: Project, durations: Durations = {}): Compiled {
   }
   const total = cursor;
 
-  for (const a of project.global_audio_tracks ?? []) {
+  for (const orig of project.global_audio_tracks ?? []) {
+    const a = audioFor(orig, lang);
     const s = a.start ?? 0;
     files.audio.add(a.file);
     audio.push({

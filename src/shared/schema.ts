@@ -46,7 +46,8 @@ export function resolveStyle(st: z.infer<typeof StyleSchema>, text: Partial<Reco
 export const TextSchema = z.object({
   type: z.literal('text').optional(),
   style: z.string(),
-  content: z.string(),
+  /** Texte, ou table `{ fr: "…", en: "…" }` quand le projet a plusieurs langues. */
+  content: z.union([z.string(), z.record(z.string(), z.string())]),
   position: Vec2,
   /** Surcharges du style, propres à ce texte. */
   font: z.string().optional(),
@@ -128,6 +129,21 @@ export const AudioSchema = z.object({
    */
   role: z.enum(['narration', 'music', 'sfx']).optional(),
   file: z.string(),
+  /**
+   * Variantes par langue (narration traduite) : fichier, point de départ et durée propres à la langue.
+   * Les autres champs (début dans la scène, volume, fondus…) restent communs. La langue par défaut
+   * (la première de `languages`) utilise les champs de base.
+   */
+  variants: z
+    .record(
+      z.string(),
+      z.object({
+        file: z.string().optional(),
+        offset: z.number().min(0).optional(),
+        duration: z.number().positive().optional(),
+      }),
+    )
+    .optional(),
   /** Point de départ dans le fichier (s) : permet de jouer un extrait d'une narration plus longue. */
   offset: z.number().min(0).optional(),
   start: z.number().min(0).optional(),
@@ -171,6 +187,8 @@ export const ProjectSchema = z
       output_file: z.string().min(1),
     }),
     styles: z.record(z.string(), StyleSchema),
+    /** Langues du livre (codes libres : fr, en…). La première est la langue par défaut ; un MP4 est exporté par langue. */
+    languages: z.array(z.string().min(1)).optional(),
     /** Atténuation automatique de la musique pendant les narrations. */
     ducking: z
       .object({
@@ -203,6 +221,32 @@ export const ProjectSchema = z
       });
     });
   });
+
+/** Texte d'une langue ; repli sur la langue par défaut puis sur la première valeur disponible. */
+export function textFor(content: string | Record<string, string>, lang?: string, def?: string): string {
+  if (typeof content === 'string') return content;
+  return content[lang ?? ''] ?? content[def ?? ''] ?? Object.values(content)[0] ?? '';
+}
+
+/** Passage audio tel qu'il se joue dans la langue `lang` (variante appliquée si elle existe). */
+export function audioFor<T extends AudioCfg>(a: T, lang?: string): T {
+  const v = lang ? a.variants?.[lang] : undefined;
+  if (!v) return a;
+  return {
+    ...a,
+    file: v.file ?? a.file,
+    // un autre fichier n'hérite ni du point de départ ni de la durée du fichier de base
+    offset: v.offset ?? (v.file ? undefined : a.offset),
+    duration: v.duration ?? (v.file ? undefined : a.duration),
+  };
+}
+
+/** Nom du MP4 d'une langue : `livre.mp4` → `livre.en.mp4`. */
+export function outputName(file: string, lang?: string): string {
+  if (!lang) return file;
+  const i = file.lastIndexOf('.');
+  return i > 0 ? `${file.slice(0, i)}.${lang}${file.slice(i)}` : `${file}.${lang}`;
+}
 
 export type Effects = z.infer<typeof EffectsSchema>;
 export type Style = z.infer<typeof StyleSchema>;
