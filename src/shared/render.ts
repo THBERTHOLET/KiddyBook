@@ -1,4 +1,5 @@
-import { sceneAt, type Compiled, type Layer } from './compile';
+import { sceneAt, type Compiled, type CompiledScene, type Layer } from './compile';
+import { drawTransition } from './transitions';
 import { fontFamily, resolveStyle, type Effects, type Project, type Style } from './schema';
 import type { Media } from './media';
 
@@ -217,18 +218,16 @@ function drawLayer(
   ctx.restore();
 }
 
-/** Rend l'image au temps global `t` (s). Même code pour l'aperçu et l'export. */
-export function renderFrame(
+/** Dessine une scène complète (fond, couches, fondu de scène) au temps local `lt`. */
+function drawScene(
   ctx: CanvasRenderingContext2D,
   project: Project,
-  c: Compiled,
   media: Media,
-  t: number,
+  s: CompiledScene,
+  lt: number,
+  W: number,
+  H: number,
 ) {
-  const [W, H] = project.project.resolution;
-  const s = sceneAt(c, t);
-  const lt = t - s.start;
-
   ctx.save();
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#000';
@@ -254,6 +253,36 @@ export function renderFrame(
   if (sa < 1) {
     ctx.fillStyle = `rgba(0,0,0,${1 - sa})`;
     ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+/** Rend l'image au temps global `t` (s). Même code pour l'aperçu et l'export. */
+export function renderFrame(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  c: Compiled,
+  media: Media,
+  t: number,
+) {
+  const [W, H] = project.project.resolution;
+  const s = sceneAt(c, t);
+
+  ctx.save();
+  const tx = c.transitions.find((x) => t >= x.t0 && t < x.t1);
+  if (tx) {
+    // transition générée : la scène sortante (figée sur sa dernière image) et la scène entrante sont
+    // rendues séparément, puis composées selon l'effet
+    const from = c.scenes[tx.from];
+    const to = c.scenes[tx.to];
+    const a = scratchCanvas('trA', W, H);
+    const b = scratchCanvas('trB', W, H);
+    drawScene(a, project, media, from, from.duration - 0.001, W, H);
+    drawScene(b, project, media, to, t - to.start, W, H);
+    ctx.clearRect(0, 0, W, H);
+    drawTransition(ctx, tx.effect, (t - tx.t0) / Math.max(1e-6, tx.t1 - tx.t0), a.canvas, b.canvas, W, H);
+  } else {
+    drawScene(ctx, project, media, s, t - s.start, W, H);
   }
 
   for (const o of c.overlays) {

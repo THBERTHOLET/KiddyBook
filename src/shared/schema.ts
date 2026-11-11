@@ -154,13 +154,30 @@ export const AudioSchema = z.object({
   fade_out: z.number().min(0).optional(),
 });
 
-/** Vidéo superposée (alpha) entre deux scènes. Par défaut centrée sur la coupure. */
-export const TransitionSchema = z.object({
-  type: z.literal('video_overlay'),
-  file: z.string(),
-  duration: z.number().positive(),
-  offset: z.number().optional(),
-});
+/** Effets de transition générés par le moteur (voir `transitions.ts` pour les libellés). */
+export const TRANSITION_EFFECTS = [
+  'page_turn', 'crossfade', 'dip_black', 'slide_left', 'slide_right', 'push_left', 'push_right', 'wipe_left', 'wipe_right', 'zoom_in', 'circle',
+] as const;
+export type TransitionEffect = (typeof TRANSITION_EFFECTS)[number];
+
+/**
+ * Transition vers la scène suivante : soit une vidéo superposée (alpha), centrée par défaut sur la coupure,
+ * soit un effet généré (`effect`) : pendant `duration` s au début de la scène suivante, la scène précédente,
+ * figée sur sa dernière image, laisse la place à la suivante, qui continue de jouer.
+ */
+export const TransitionSchema = z.union([
+  z.object({
+    type: z.literal('video_overlay'),
+    file: z.string(),
+    duration: z.number().positive(),
+    offset: z.number().optional(),
+  }),
+  z.object({
+    type: z.literal('effect'),
+    effect: z.enum(TRANSITION_EFFECTS),
+    duration: z.number().positive(),
+  }),
+]);
 
 export const SceneSchema = z.object({
   type: z.enum(['cover', 'page', 'end']),

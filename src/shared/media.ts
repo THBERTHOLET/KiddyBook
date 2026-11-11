@@ -81,6 +81,15 @@ export class Media {
       }
     }
     for (const o of c.overlays) if (t >= o.t0 && t < o.t1) wanted.set(o.file, t - o.t0);
+    // transition générée : la scène sortante est figée sur sa dernière image, ses vidéos aussi
+    for (const x of c.transitions) {
+      if (t < x.t0 || t >= x.t1) continue;
+      const from = c.scenes[x.from];
+      const lt = from.duration - 0.001;
+      for (const l of from.layers) {
+        if (l.kind === 'video' && lt >= l.t0 && lt < l.t1 && !wanted.has(l.file)) wanted.set(l.file, lt - l.t0);
+      }
+    }
 
     const jobs: Promise<void>[] = [];
     for (const [file, v] of this.videos) {

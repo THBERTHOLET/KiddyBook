@@ -1,4 +1,4 @@
-import { audioFor, textFor, type Effects, type Project, type Scene } from './schema';
+import { audioFor, textFor, type Effects, type Project, type Scene, type TransitionEffect } from './schema';
 
 interface LayerBase {
   /** Objet du projet dont la couche est issue (permet à l'éditeur de le modifier). */
@@ -33,6 +33,15 @@ export interface Overlay {
   t1: number;
 }
 
+/** Transition générée entre deux scènes (indices dans `scenes`), en temps global. */
+export interface EffectTransition {
+  effect: TransitionEffect;
+  from: number;
+  to: number;
+  t0: number;
+  t1: number;
+}
+
 export type AudioRole = 'narration' | 'music' | 'sfx';
 
 /** Piste audio à plat, en temps global. */
@@ -63,6 +72,7 @@ export interface Compiled {
   total: number;
   scenes: CompiledScene[];
   overlays: Overlay[];
+  transitions: EffectTransition[];
   audio: AudioEvent[];
   duck?: Duck;
   /** Fichiers référencés, par catégorie. */
@@ -101,6 +111,8 @@ export function compile(project: Project, durations: Durations = {}, lang?: stri
   const audio: AudioEvent[] = [];
   const files = { images: new Set<string>(), videos: new Set<string>(), audio: new Set<string>() };
 
+  const transitions: EffectTransition[] = [];
+  let prevEffect = false;
   let cursor = 0;
   for (const [index, scene] of project.timeline.entries()) {
     const start = cursor;
@@ -172,10 +184,17 @@ export function compile(project: Project, durations: Durations = {}, lang?: stri
     }
 
     const tr = scene.transition_to_next;
-    if (tr && index < project.timeline.length - 1) {
-      const t0 = end + (tr.offset ?? -tr.duration / 2);
-      overlays.push({ file: tr.file, t0: Math.max(0, t0), t1: Math.max(0, t0) + tr.duration });
-      files.videos.add(tr.file);
+    const isLast = index >= project.timeline.length - 1;
+    let effect: TransitionEffect | undefined;
+    if (tr && !isLast) {
+      if (tr.type === 'effect') {
+        effect = tr.effect;
+        transitions.push({ effect, from: index, to: index + 1, t0: end, t1: end + tr.duration });
+      } else {
+        const t0 = end + (tr.offset ?? -tr.duration / 2);
+        overlays.push({ file: tr.file, t0: Math.max(0, t0), t1: Math.max(0, t0) + tr.duration });
+        files.videos.add(tr.file);
+      }
     }
 
     scenes.push({
@@ -183,14 +202,18 @@ export function compile(project: Project, durations: Durations = {}, lang?: stri
       start,
       end,
       duration,
-      fadeIn: scene.fade_in ?? 0,
-      fadeOut: scene.fade_out ?? 0,
+      // la transition remplace les fondus au noir de la coupure
+      fadeIn: prevEffect ? 0 : (scene.fade_in ?? 0),
+      fadeOut: effect ? 0 : (scene.fade_out ?? 0),
       scene,
       layers,
     });
+    prevEffect = !!effect;
     cursor = end;
   }
   const total = cursor;
+  // une transition ne peut pas dépasser la scène qui la reçoit
+  for (const x of transitions) x.t1 = Math.min(x.t1, scenes[x.to].end);
 
   for (const orig of project.global_audio_tracks ?? []) {
     const a = audioFor(orig, lang);
@@ -225,7 +248,7 @@ export function compile(project: Project, durations: Durations = {}, lang?: stri
     }
   }
 
-  return { total, scenes, overlays, audio, duck, files };
+  return { total, scenes, overlays, transitions, audio, duck, files };
 }
 
 export function sceneAt(c: Compiled, t: number): CompiledScene {

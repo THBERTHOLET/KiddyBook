@@ -1,7 +1,8 @@
 import { compile, sceneAt, type Compiled, type Durations, type Layer } from '../shared/compile';
 import { Media } from '../shared/media';
 import { layoutText, renderFrame } from '../shared/render';
-import { audioFor, outputName, ProjectSchema, resolveStyle, TEXT_OVERRIDES, type Project, type Scene } from '../shared/schema';
+import { audioFor, outputName, ProjectSchema, resolveStyle, TEXT_OVERRIDES, textFor, TRANSITION_EFFECTS, type Project, type Scene, type TransitionEffect } from '../shared/schema';
+import { EFFECT_LABELS } from '../shared/transitions';
 import { AudioPlayer } from './audio';
 import { areaField, checkField, fmtTime, h, numField, row, selectField, textField, vecField } from './ui';
 
@@ -137,6 +138,7 @@ async function changed() {
   t = Math.min(t, compiled.total);
   renderSceneList();
   renderTimeline();
+  refreshRecap();
   await draw();
   if (wasPlaying) play();
   if (parsed.success) scheduleSave();
@@ -271,6 +273,36 @@ function renderSceneList() {
         'div',
         {
           class: 'scene-item' + (i === selScene ? ' sel' : ''),
+          draggable: 'true',
+          title: 'Glisser pour réordonner',
+          ondragstart: (e: DragEvent) => {
+            e.dataTransfer!.setData('text/scene', String(i));
+            e.dataTransfer!.effectAllowed = 'move';
+            (e.currentTarget as HTMLElement).classList.add('dragging');
+          },
+          ondragend: () => document.querySelectorAll('.scene-item').forEach((n) => n.classList.remove('dragging', 'drop-before', 'drop-after')),
+          ondragover: (e: DragEvent) => {
+            if (!e.dataTransfer?.types.includes('text/scene')) return;
+            e.preventDefault();
+            const el = e.currentTarget as HTMLElement;
+            const r = el.getBoundingClientRect();
+            const after = e.clientY > r.top + r.height / 2;
+            el.classList.toggle('drop-after', after);
+            el.classList.toggle('drop-before', !after);
+          },
+          ondragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove('drop-before', 'drop-after'),
+          ondrop: (e: DragEvent) => {
+            const from = Number(e.dataTransfer?.getData('text/scene'));
+            if (!e.dataTransfer?.types.includes('text/scene') || Number.isNaN(from)) return;
+            e.preventDefault();
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            let to = i + (e.clientY > r.top + r.height / 2 ? 1 : 0);
+            const moved = project.timeline.splice(from, 1)[0];
+            if (from < to) to--;
+            project.timeline.splice(to, 0, moved);
+            selScene = to;
+            void rebuild().then(() => seek(compiled.scenes[selScene].start));
+          },
           onclick: () => {
             selScene = i;
             tab = 'scene';
@@ -364,7 +396,7 @@ function editLabel(label: HTMLElement, o: any, def: string) {
     }
     label.textContent = o.name ?? def;
     input.replaceWith(label);
-    if (commit) void changed();
+    if (commit) void changed().then(renderInspector); // le récapitulatif et le détail affichent le nouveau nom
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -718,9 +750,9 @@ function roleSelect(o: any, def: 'music' | 'sfx') {
   return sel;
 }
 
-function audioForm(o: any, title: string, onDelete: () => void, defaultRole: 'music' | 'sfx' = 'sfx') {
+function audioForm(o: any, title: string, onDelete: (() => void) | undefined, defaultRole: 'music' | 'sfx' = 'sfx') {
   const len = o.duration ?? (audioDur[o.file] != null ? audioDur[o.file] - (o.offset ?? 0) : undefined);
-  return fieldset({ key: o, title, rename: true }, [h('button', { class: 'small', title: 'Écouter ce passage seul (Échap pour arrêter)', onclick: () => audition(o) }, '▶'), delBtn(onDelete)],
+  return fieldset({ key: o, title, rename: true }, [h('button', { class: 'small', title: 'Écouter ce passage seul (Échap pour arrêter)', onclick: () => audition(o) }, '▶'), onDelete ? delBtn(onDelete) : null],
     row('Fichier', textField(o, 'file', changed, { list: 'dl-audio', folder: 'audio' })),
     row('Type', roleSelect(o, defaultRole)),
     row('Début (s)', numField(o, 'start', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'dans la scène')),
@@ -760,90 +792,299 @@ function variantRows(o: any): HTMLElement[] {
   return rows;
 }
 
-function scenePane(): HTMLElement[] {
+/** Un élément de la scène, tel que le récapitulatif en haut de l'inspecteur le présente. */
+interface Item {
+  ref: any;
+  kind: 'scene' | 'image' | 'video' | 'text' | 'audio' | 'transition';
+  /** nom par défaut du formulaire (renommable au double-clic) */
+  title: string;
+  /** libellé de la ligne du récapitulatif */
+  label: string;
+  tip?: string;
+  /** début (s, dans la scène) et durée : nombre, texte (« ∞ ») ou inconnu */
+  start?: number;
+  dur?: number | string;
+  /** écritures au double-clic sur le début / la durée (`undefined` = valeur par défaut) ; absent = non éditable */
+  setStart?: (v: number | undefined) => void;
+  setDur?: (v: number | undefined) => void;
+  move?: (d: number) => void;
+  dup?: () => void;
+  del?: () => void;
+}
+
+const ITEM_ICON: Record<Item['kind'], string> = { scene: '▣', image: '🖼', video: '🎬', text: 'T', audio: '🔊', transition: '⇄' };
+
+/** Éléments de la scène sélectionnée, dans l'ordre d'empilement (le premier est au fond), puis audio et transition. */
+function sceneItems(): Item[] {
   const s = project.timeline[selScene];
   const tl = project.timeline;
-  const defaultPos = (): [number, number] => [project.project.resolution[0] / 2, project.project.resolution[1] * 0.85];
-  const firstStyle = Object.keys(project.styles)[0] ?? '';
+  const cs = compiled.scenes[selScene];
+  const layer = (ref: any) => cs.layers.find((l) => l.ref === ref);
+  const items: Item[] = [{
+    ref: s, kind: 'scene', title: `Scène ${selScene + 1}`, label: `Scène ${selScene + 1} · ${sceneLabel(s, selScene)}`,
+    start: 0, dur: cs.duration,
+    // une durée automatique se règle dans le détail (case « Durée auto »)
+    setDur: s.auto_duration ? undefined : (v) => { if (v != null && v >= 0.5) s.duration = v; },
+    move: (d) => moveItem(tl, selScene, d) && ((selScene += d), void rebuild()),
+    dup: duplicateScene,
+    del: tl.length > 1 ? () => (tl.splice(selScene, 1), (selScene = Math.max(0, selScene - 1)), void rebuild()) : undefined,
+  }];
 
-  const sections = () => [s, s.illustration, ...(s.elements ?? []), ...(s.texts ?? []), ...(s.audio ?? []), s.transition_to_next].filter(Boolean) as object[];
-  const foldAll = (fold: boolean) => () => {
-    for (const k of sections()) fold ? collapsed.add(k) : collapsed.delete(k);
-    renderInspector();
-  };
-
-  const out: HTMLElement[] = [
-    h('div', { class: 'btnrow' },
-      h('button', { class: 'small', onclick: foldAll(true) }, '▸ Tout replier'),
-      h('button', { class: 'small', onclick: foldAll(false) }, '▾ Tout déplier'),
-      h('span', { class: 'hint' }, 'Double-clic sur un titre pour le renommer'),
-    ),
-    fieldset({ key: s, title: `Scène ${selScene + 1}` }, [
-      h('button', { class: 'small', onclick: () => moveItem(tl, selScene, -1) && (selScene--, rebuild()) }, '↑'),
-      h('button', { class: 'small', onclick: () => moveItem(tl, selScene, 1) && (selScene++, rebuild()) }, '↓'),
-      h('button', { class: 'small', title: 'Dupliquer', onclick: duplicateScene }, '⧉'),
-      tl.length > 1 ? delBtn(() => (tl.splice(selScene, 1), (selScene = Math.max(0, selScene - 1)), rebuild())) : null,
-    ],
-      row('Type', selectField(s, 'type', ['cover', 'page', 'end'], rebuild)),
-      row('N° de page', numField(s, 'page_index', changed, { step: 1, optional: true })),
-      row('Fond', textField(s, 'background', changed, { list: 'dl-img', optional: true, folder: 'backgrounds' })),
-      row('Durée (s)', numField(s, 'duration', changed, { min: 0.5 }),
-        h('span', { class: 'hint' }, s.auto_duration ? `auto : ${compiled.scenes[selScene].duration.toFixed(1)} s` : '')),
-      row('Durée auto', checkField(s, 'auto_duration', rebuild), numField(s, 'end_pad', changed, { min: 0, step: 0.1, optional: true }),
-        h('span', { class: 'hint' }, 's de marge (déf. 1)')),
-      s.auto_duration && !(s.audio ?? []).some((a) => a.role === 'narration')
-        ? h('div', { class: 'hint' }, 'Aucun passage de type Narration dans cette scène : la durée manuelle est utilisée.')
-        : h('div', { class: 'hint' }, 'Durée auto = fin de la dernière narration + marge.'),
-      row('Fondu', numField(s, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(s, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
-    ),
-  ];
-
-  // illustration
-  // `illustration` est la première image de la scène ; les suivantes sont des éléments de type image.
-  // Images, vidéos et textes libres : un seul empilement, le premier de la liste est au fond.
   const count = { image: 0, video: 0, text: 0 };
-  out.push(h('div', { class: 'hint' }, 'Ordre d’empilement : le premier de la liste est au fond (↑ vers le fond, ↓ vers l’avant).'));
-  (s.elements ??= []).forEach((e, i) => {
-    const kind = 'file' in e ? (e.type === 'video' ? 'video' : 'image') : 'text';
-    const label = { image: 'Illustration', video: 'Vidéo', text: 'Texte' }[kind];
-    out.push(layerForm(e, kind, `${label} ${++count[kind]}`, () => (s.elements!.splice(i, 1), rebuild()), (d) => moveItem(s.elements!, i, d) && rebuild()));
+  const layerItem = (e: any, arr: any[], i: number, kind: 'image' | 'video' | 'text'): Item => {
+    const title = `${{ image: 'Illustration', video: 'Vidéo', text: 'Texte' }[kind]} ${++count[kind]}`;
+    const l = layer(e);
+    const preview = kind === 'text' ? textFor(e.content, activeLang(), project.languages?.[0]).replace(/\s+/g, ' ') : e.file;
+    return {
+      ref: e, kind, title, label: e.name ?? (preview ? `${title} · ${preview}` : title), tip: preview,
+      start: l?.t0 ?? e.start ?? 0, dur: l ? l.t1 - l.t0 : undefined,
+      // avec une synchro audio, l'heure affichée inclut le début du passage : on n'écrit que le décalage
+      setStart: (v) => {
+        if (v == null) return void delete e.start;
+        e.start = Math.max(0, +(v - ((l?.t0 ?? e.start ?? 0) - (e.start ?? 0))).toFixed(3));
+      },
+      setDur: (v) => (v != null && v > 0 ? (e.duration = v) : delete e.duration),
+      move: (d) => moveItem(arr, i, d) && void rebuild(),
+      del: () => (arr.splice(i, 1), void rebuild()),
+    };
+  };
+  (s.elements ??= []).forEach((e, i) => items.push(layerItem(e, s.elements!, i, 'file' in e ? (e.type === 'video' ? 'video' : 'image') : 'text')));
+  (s.texts ??= []).forEach((e, i) => items.push(layerItem(e, s.texts!, i, 'text')));
+
+  (s.audio ??= []).forEach((a, i) => {
+    const r = audioFor(a, activeLang());
+    const natural = audioDur[r.file] != null ? audioDur[r.file] - (r.offset ?? 0) : undefined;
+    const title = `Audio ${i + 1}`;
+    items.push({
+      ref: a, kind: 'audio', title, label: a.name ?? `${title} · ${ROLE_LABELS[a.role ?? 'sfx']}`, tip: r.file,
+      start: a.start ?? 0, dur: a.loop ? '∞' : (r.duration ?? natural),
+      setStart: (v) => (v != null && v > 0 ? (a.start = v) : delete a.start),
+      // la durée de la langue par défaut ; les autres langues se règlent dans le détail
+      setDur: (v) => (v != null && v > 0 ? (a.duration = v) : delete a.duration),
+      move: (d) => moveItem(s.audio!, i, d) && void rebuild(),
+      del: () => (s.audio!.splice(i, 1), void rebuild()),
+    });
   });
 
-  const addIllustration = () => {
-    const n = count.image; // décale légèrement chaque nouvelle image pour qu'elles ne se superposent pas
-    const img = { type: 'image' as const, file: '', position: [460 + 40 * n, 140 + 40 * n] as [number, number], size: [1000, 640] as [number, number], start: 0.3, fade_in: 0.5 };
-    s.elements!.push(img);
-    selRef = img;
+  const tr = s.transition_to_next;
+  if (tr) {
+    const fx = tr.type === 'effect';
+    items.push({
+      ref: tr, kind: 'transition', title: 'Transition vers la suivante',
+      label: fx ? `Transition · ${EFFECT_LABELS[tr.effect]}` : 'Transition · vidéo', tip: fx ? undefined : tr.file,
+      // effet : il occupe le début de la scène suivante ; vidéo : centrée sur la coupure par défaut
+      start: fx ? cs.duration : cs.duration + (tr.offset ?? -tr.duration / 2), dur: tr.duration,
+      setStart: fx ? undefined : (v) => { if (v != null) (tr as { offset?: number }).offset = +(v - cs.duration).toFixed(3); },
+      setDur: (v) => { if (v != null && v > 0) tr.duration = v; },
+      del: () => (delete s.transition_to_next, void rebuild()),
+    });
+  }
+  return items;
+}
+
+const fmtSec = (v?: number | string) => (v == null ? '—' : typeof v === 'string' ? v : `${+v.toFixed(1)}s`);
+
+/** Clic sur une ligne : l'élément devient le détail affiché en bas ; il est rendu visible dans l'aperçu au besoin. */
+function selectItem(it: Item) {
+  if (it.ref === selRef) return; // déjà affiché : ne pas reconstruire (sinon un double-clic perd sa cible)
+  selRef = it.ref;
+  const cs = compiled.scenes[selScene];
+  const l = cs.layers.find((x) => x.ref === it.ref);
+  if (l) {
+    const lt = t - cs.start;
+    if (lt < l.t0 || lt >= l.t1) void seek(cs.start + l.t0 + Math.min(l.fadeIn + 0.05, (l.t1 - l.t0) / 2));
+  }
+  renderInspector();
+  drawOverlay();
+}
+
+/** Cellule de temps du récapitulatif ; double-clic = édition (Entrée valide, Échap annule, vide = valeur par défaut). */
+function numCell(value: number | string | undefined, set?: (v: number | undefined) => void): HTMLElement {
+  const cell = h('span', { class: 'num' + (set ? ' editable' : ''), title: set ? 'Double-clic pour modifier' : undefined }, fmtSec(value));
+  if (!set) return cell;
+  cell.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    const input = h('input', { type: 'number', class: 'sec-edit num-edit', step: 0.1, min: 0, value: typeof value === 'number' ? +value.toFixed(2) : '' }) as HTMLInputElement;
+    cell.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
+      const raw = input.value.trim();
+      if (commit && (raw === '' || Number.isFinite(Number(raw)))) {
+        set(raw === '' ? undefined : Math.max(0, Number(raw)));
+        void changed().then(renderInspector); // le détail affiche la nouvelle valeur
+      } else input.replaceWith(cell);
+    };
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter') finish(true);
+      else if (ev.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+  });
+  return cell;
+}
+
+/** Récapitulatif compact de la scène : une ligne par élément, avec début, durée et actions. */
+function buildRecap(): HTMLElement {
+  const items = sceneItems();
+  const sel = items.find((it) => it.ref === selRef) ?? items[0];
+  const btn = (txt: string, tip: string, fn: () => void, cls = '') =>
+    h('button', { class: `small ${cls}`, title: tip, onclick: (e: Event) => (e.stopPropagation(), fn()) }, txt);
+  const rows = items.map((it) => {
+    const r = h('div', { class: 'recap-row' + (it === sel ? ' sel' : ''), title: it.tip, onclick: () => selectItem(it) },
+      h('span', { class: 'ico' }, ITEM_ICON[it.kind]),
+      Object.assign(h('span', { class: 'nm', title: 'Double-clic pour renommer' }), { ondblclick: (e: Event) => editLabel(e.currentTarget as HTMLElement, it.ref, it.title) }, { textContent: it.label }),
+      numCell(it.start, it.setStart),
+      numCell(it.dur, it.setDur),
+      h('span', { class: 'acts' },
+        it.move ? btn('↑', it.kind === 'scene' ? 'Monter la scène' : 'Vers le fond / plus tôt dans la liste', () => it.move!(-1)) : null,
+        it.move ? btn('↓', it.kind === 'scene' ? 'Descendre la scène' : 'Vers l’avant / plus tard dans la liste', () => it.move!(1)) : null,
+        it.dup ? btn('⧉', 'Dupliquer', it.dup) : null,
+        it.del ? btn('✕', 'Supprimer', it.del, 'danger') : null,
+      ),
+    );
+    (r as any)._ref = it.ref;
+    return r;
+  });
+  return h('div', { class: 'recap', id: 'recap' },
+    h('div', { class: 'recap-head' },
+      h('span', { class: 'ico' }), h('span', { class: 'nm' }, 'Éléments (le 1er est au fond)'), h('span', { class: 'num' }, 'début'), h('span', { class: 'num' }, 'durée'), h('span', { class: 'acts' })),
+    ...rows,
+  );
+}
+
+/** Remet à jour le récapitulatif sans toucher au détail (le focus des champs est conservé). */
+function refreshRecap() {
+  const old = document.getElementById('recap');
+  if (old && tab === 'scene' && project) old.replaceWith(buildRecap());
+}
+
+function sceneForm(s: Scene): HTMLElement {
+  return fieldset({ key: s, title: `Scène ${selScene + 1}` }, [],
+    row('Type', selectField(s, 'type', ['cover', 'page', 'end'], rebuild)),
+    row('N° de page', numField(s, 'page_index', changed, { step: 1, optional: true })),
+    row('Fond', textField(s, 'background', changed, { list: 'dl-img', optional: true, folder: 'backgrounds' })),
+    row('Durée (s)', numField(s, 'duration', changed, { min: 0.5 }),
+      h('span', { class: 'hint' }, s.auto_duration ? `auto : ${compiled.scenes[selScene].duration.toFixed(1)} s` : '')),
+    row('Durée auto', checkField(s, 'auto_duration', rebuild), numField(s, 'end_pad', changed, { min: 0, step: 0.1, optional: true }),
+      h('span', { class: 'hint' }, 's de marge (déf. 1)')),
+    s.auto_duration && !(s.audio ?? []).some((a) => a.role === 'narration')
+      ? h('div', { class: 'hint' }, 'Aucun passage de type Narration dans cette scène : la durée manuelle est utilisée.')
+      : h('div', { class: 'hint' }, 'Durée auto = fin de la dernière narration + marge.'),
+    row('Fondu', numField(s, 'fade_in', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'in'), numField(s, 'fade_out', changed, { min: 0, optional: true }), h('span', { class: 'hint' }, 'out')),
+  );
+}
+
+/** Détail de la transition : effet généré par le moteur, ou vidéo superposée (alpha). */
+function transitionForm(s: Scene, tr: NonNullable<Scene['transition_to_next']>, title: string): HTMLElement {
+  const kind = h('select', {
+    onchange: (e: Event) => {
+      const next = (e.target as HTMLSelectElement).value === 'effect'
+        ? { type: 'effect' as const, effect: 'page_turn' as const, duration: 1.4 }
+        : { type: 'video_overlay' as const, file: '', duration: 1 };
+      s.transition_to_next = next;
+      selRef = next;
+      void rebuild();
+    },
+  },
+    h('option', { value: 'effect' }, 'Effet prédéfini'),
+    h('option', { value: 'video_overlay' }, 'Vidéo superposée (alpha)'),
+  ) as HTMLSelectElement;
+  kind.value = tr.type;
+
+  if (tr.type === 'effect') {
+    const effect = h('select', {
+      onchange: (e: Event) => {
+        tr.effect = (e.target as HTMLSelectElement).value as TransitionEffect;
+        void changed().then(() => seek(compiled.scenes[selScene].end + 0.01)); // montre le début de la transition
+      },
+    }, ...TRANSITION_EFFECTS.map((id) => h('option', { value: id }, EFFECT_LABELS[id]))) as HTMLSelectElement;
+    effect.value = tr.effect;
+    const toAll = () => {
+      const last = project.timeline.length - 1;
+      project.timeline.forEach((sc, i) => { if (i < last) sc.transition_to_next = structuredClone(tr); });
+      void rebuild();
+    };
+    return fieldset({ key: tr, title }, [],
+      row('Type', kind),
+      row('Effet', effect),
+      row('Durée (s)', numField(tr, 'duration', changed, { min: 0.2, step: 0.1 })),
+      h('div', { class: 'hint' }, 'La scène précédente reste figée sur sa dernière image pendant que la suivante apparaît : la durée est prise sur le début de la scène suivante. Les fondus au noir de la coupure sont remplacés.'),
+      h('button', { title: 'Copie cette transition sur chaque scène (sauf la dernière)', onclick: toAll }, 'Appliquer à toutes les scènes'),
+    );
+  }
+  return fieldset({ key: tr, title }, [],
+    row('Type', kind),
+    row('Vidéo', textField(tr, 'file', changed, { list: 'dl-video', folder: 'transitions' })),
+    row('Durée (s)', numField(tr, 'duration', changed, { min: 0.1 })),
+    row('Décalage', numField(tr, 'offset', changed, { optional: true }), h('span', { class: 'hint' }, 'vs fin de scène')),
+  );
+}
+
+function scenePane(): HTMLElement[] {
+  const s = project.timeline[selScene];
+  const defaultPos = (): [number, number] => [project.project.resolution[0] / 2, project.project.resolution[1] * 0.85];
+  const firstStyle = Object.keys(project.styles)[0] ?? '';
+  const items = sceneItems();
+  const sel = items.find((it) => it.ref === selRef) ?? items[0];
+  const nImages = items.filter((it) => it.kind === 'image').length;
+
+  /** Ajoute un élément, le sélectionne : son détail s'affiche en bas. */
+  const add = (ref: any, push: () => void) => {
+    push();
+    selRef = ref;
     void rebuild();
   };
 
-  // textes
-  (s.texts ??= []).forEach((e, i) =>
-    out.push(layerForm(e, 'text', `Texte ${i + 1}`, () => (s.texts!.splice(i, 1), rebuild()), (d) => moveItem(s.texts!, i, d) && rebuild())),
+  const adds = h('div', { class: 'btnrow' },
+    h('button', {
+      onclick: () => {
+        const n = nImages; // décale légèrement chaque nouvelle image pour qu'elles ne se superposent pas
+        const img = { type: 'image' as const, file: '', position: [460 + 40 * n, 140 + 40 * n] as [number, number], size: [1000, 640] as [number, number], start: 0.3, fade_in: 0.5 };
+        add(img, () => s.elements!.push(img));
+      },
+    }, '+ Illustration'),
+    h('button', {
+      onclick: () => {
+        const tx = { style: firstStyle, content: 'Nouveau texte', position: defaultPos(), start: 0.5, fade_in: 0.5 };
+        add(tx, () => s.texts!.push(tx));
+      },
+    }, '+ Texte'),
+    h('button', {
+      onclick: () => {
+        const v = { type: 'video' as const, file: '', position: [0, 0] as [number, number], size: project.project.resolution };
+        add(v, () => s.elements!.push(v));
+      },
+    }, '+ Vidéo'),
+    h('button', {
+      onclick: () => {
+        const a = { file: '', start: 0, volume: 1 };
+        add(a, () => s.audio!.push(a));
+      },
+    }, '+ Piste audio'),
+    s.transition_to_next ? null : h('button', {
+      onclick: () => {
+        const tr = { type: 'effect' as const, effect: 'page_turn' as const, duration: 1.4 };
+        add(tr, () => (s.transition_to_next = tr));
+      },
+    }, '+ Transition'),
   );
-  out.push(
-    h('div', { class: 'btnrow' },
-      h('button', { onclick: addIllustration }, '+ Illustration'),
-      h('button', { onclick: () => (s.texts!.push({ style: firstStyle, content: 'Nouveau texte', position: defaultPos(), start: 0.5, fade_in: 0.5 }), rebuild()) }, '+ Texte'),
-      h('button', { onclick: () => (s.elements!.push({ type: 'video', file: '', position: [0, 0], size: project.project.resolution }), rebuild()) }, '+ Vidéo'),
-    ),
-  );
 
-  // audio
-  (s.audio ??= []).forEach((a, i) => out.push(audioForm(a, `Audio ${i + 1}`, () => (s.audio!.splice(i, 1), rebuild()), 'sfx')));
-  out.push(h('button', { onclick: () => (s.audio!.push({ file: '', start: 0, volume: 1 }), rebuild()) }, '+ Piste audio'));
+  // détail : un seul élément à la fois, sous les boutons d'ajout, jamais replié
+  collapsed.delete(sel.ref);
+  let detail: HTMLElement;
+  if (sel.kind === 'scene') detail = sceneForm(s);
+  else if (sel.kind === 'audio') detail = audioForm(sel.ref, sel.title, undefined, 'sfx');
+  else if (sel.kind === 'transition') {
+    detail = transitionForm(s, sel.ref as NonNullable<Scene['transition_to_next']>, sel.title);
+  } else detail = layerForm(sel.ref, sel.kind, sel.title);
+  detail.classList.add('detail');
 
-  // transition
-  if (s.transition_to_next) {
-    const tr = s.transition_to_next;
-    out.push(fieldset({ key: tr, title: 'Transition vers la suivante' }, [delBtn(() => (delete s.transition_to_next, rebuild()))],
-      row('Vidéo', textField(tr, 'file', changed, { list: 'dl-video', folder: 'transitions' })),
-      row('Durée (s)', numField(tr, 'duration', changed, { min: 0.1 })),
-      row('Décalage', numField(tr, 'offset', changed, { optional: true }), h('span', { class: 'hint' }, 'vs fin de scène')),
-    ));
-  } else out.push(h('button', { onclick: () => ((s.transition_to_next = { type: 'video_overlay', file: '', duration: 1 }), rebuild()) }, '+ Transition'));
-
-  return out;
+  return [buildRecap(), adds, detail];
 }
 
 function stylesPane(): HTMLElement[] {
@@ -943,7 +1184,7 @@ function mediaPane(): HTMLElement[] {
     h('fieldset', {}, h('legend', {}, `Fichiers (${assets.length})`),
       h('div', { class: 'hint' }, 'Glissez un fichier vers l’aperçu ou un champ.'),
       ...assets.map((a) => {
-        const d = h('div', { class: 'hint asset', draggable: true }, a);
+        const d = h('div', { class: 'hint asset', draggable: 'true' }, a);
         d.addEventListener('dragstart', (e) => (e as DragEvent).dataTransfer?.setData('text/asset', a));
         return d;
       })),
@@ -1205,6 +1446,7 @@ function selectRef(ref: any, rerenderInspector: boolean) {
   if (rerenderInspector) renderInspector();
   else {
     document.querySelectorAll('#inspector fieldset').forEach((f) => f.classList.toggle('selected', (f as any)._ref === ref));
+    document.querySelectorAll('#inspector .recap-row').forEach((r) => r.classList.toggle('sel', (r as any)._ref === ref));
   }
   drawOverlay();
 }

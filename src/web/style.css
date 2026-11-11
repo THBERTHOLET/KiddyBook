@@ -62,6 +62,24 @@ textarea { width: 100%; min-height: 56px; resize: vertical; }
 .scene-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 .scene-item:hover { background: var(--panel2); }
 .scene-item.sel { border-color: var(--accent); background: var(--panel2); }
+/* récapitulatif de la scène : collé sous les onglets, il reste visible quand on défile dans le détail */
+.recap { position: sticky; top: 38px; z-index: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; max-height: 42vh; overflow-y: auto; font-size: 12px; }
+.recap-row, .recap-head { display: grid; grid-template-columns: 18px minmax(0, 1fr) 46px 46px auto; align-items: center; gap: 6px; padding: 3px 6px; }
+.recap-row { cursor: pointer; border-top: 1px solid transparent; }
+.recap-row:hover { background: var(--panel2); }
+.recap-row.sel { background: var(--panel2); box-shadow: inset 3px 0 var(--accent); }
+.recap-head { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); }
+.recap .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recap .num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.recap .num.editable { cursor: text; color: var(--text, inherit); }
+.recap .num-edit { width: 46px; padding: 1px 3px; text-align: right; }
+.recap .ico { text-align: center; color: var(--accent); }
+.recap .acts { display: flex; gap: 2px; justify-content: flex-end; min-width: 76px; }
+.recap .acts button { padding: 0 5px; line-height: 1.5; }
+fieldset.detail .chevron { display: none; }
+.scene-item.dragging { opacity: 0.4; }
+.scene-item.drop-before { box-shadow: 0 -2px 0 var(--accent); }
+.scene-item.drop-after { box-shadow: 0 2px 0 var(--accent); }
 .scene-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scene-item .dur { color: var(--muted); font-size: 11px; }
 .add-row { display: flex; gap: 6px; margin-top: 8px; }
